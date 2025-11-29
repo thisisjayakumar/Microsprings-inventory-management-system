@@ -103,37 +103,210 @@ class MOProcessExecution(models.Model):
         
         return False
     
-    def auto_assign_supervisor(self):
-        """Auto-assign the active supervisor for today's work center"""
-        from processes.models import DailySupervisorStatus
+    def auto_assign_supervisor(self, current_shift=None):
+        """
+        Auto-assign supervisor based on hierarchy:
+        1. MO-specific override (if set for this MO + process + shift)
+        2. Daily supervisor status (active supervisor from attendance check)
+        3. If both primary and backup unavailable, leave unassigned and notify
+        """
+        from processes.models import DailySupervisorStatus, WorkCenterSupervisorShift
+        from manufacturing.models import MOSupervisorOverride, SupervisorChangeLog
+        from notifications.models import WorkflowNotification
         
         try:
             today = timezone.now().date()
-            supervisor_status = DailySupervisorStatus.objects.filter(
-                date=today,
-                work_center=self.process
-            ).select_related('active_supervisor').first()
             
-            if supervisor_status:
-                self.assigned_supervisor = supervisor_status.active_supervisor
-                self.save(update_fields=['assigned_supervisor', 'updated_at'])
+            # Determine current shift if not provided
+            if not current_shift:
+                current_shift = self._get_current_shift()
+            
+            assigned_supervisor = None
+            assignment_reason = 'initial_assignment'
+            
+            # Step 1: Check for MO-specific override
+            mo_override = MOSupervisorOverride.objects.filter(
+                mo=self.mo,
+                process=self.process,
+                shift=current_shift,
+                is_active=True
+            ).select_related('primary_supervisor', 'backup_supervisor').first()
+            
+            if mo_override:
+                # Use MO-specific configuration
+                # Check daily status to see if primary is present
+                daily_status = DailySupervisorStatus.objects.filter(
+                    date=today,
+                    work_center=self.process,
+                    shift=current_shift
+                ).first()
+                
+                # Determine if MO override's primary is present
+                if daily_status and daily_status.active_supervisor == mo_override.primary_supervisor:
+                    assigned_supervisor = mo_override.primary_supervisor
+                    assignment_reason = 'initial_assignment'
+                elif daily_status and daily_status.active_supervisor == mo_override.backup_supervisor:
+                    assigned_supervisor = mo_override.backup_supervisor
+                    assignment_reason = 'attendance_absence'
+                else:
+                    # Use primary from override by default
+                    assigned_supervisor = mo_override.primary_supervisor
+                    assignment_reason = 'initial_assignment'
                 
                 logger.info(
-                    f'Auto-assigned supervisor {supervisor_status.active_supervisor.get_full_name()} '
-                    f'to process execution {self.id} ({self.process.name})'
+                    f'Using MO-specific supervisor override for {self.mo.mo_id} - '
+                    f'{self.process.name} - {current_shift}'
+                )
+            
+            # Step 2: Check daily supervisor status (from attendance/defaults)
+            if not assigned_supervisor:
+                supervisor_status = DailySupervisorStatus.objects.filter(
+                    date=today,
+                    work_center=self.process,
+                    shift=current_shift
+                ).select_related('active_supervisor').first()
+                
+                if supervisor_status:
+                    assigned_supervisor = supervisor_status.active_supervisor
+                    assignment_reason = 'attendance_absence' if not supervisor_status.is_present else 'initial_assignment'
+                else:
+                    # No daily status found - try to get from WorkCenterSupervisorShift defaults
+                    shift_config = WorkCenterSupervisorShift.objects.filter(
+                        work_center=self.process,
+                        shift=current_shift,
+                        is_active=True
+                    ).select_related('primary_supervisor').first()
+                    
+                    if shift_config:
+                        assigned_supervisor = shift_config.primary_supervisor
+                        assignment_reason = 'initial_assignment'
+                        logger.warning(
+                            f'No daily status found for {self.process.name} - {current_shift}. '
+                            f'Using default primary supervisor. Run check_supervisor_attendance command.'
+                        )
+            
+            # Step 3: Assign or leave unassigned
+            if assigned_supervisor:
+                old_supervisor = self.assigned_supervisor
+                self.assigned_supervisor = assigned_supervisor
+                self.save(update_fields=['assigned_supervisor', 'updated_at'])
+                
+                # Log the change
+                SupervisorChangeLog.objects.create(
+                    mo_process_execution=self,
+                    from_supervisor=old_supervisor,
+                    to_supervisor=assigned_supervisor,
+                    change_reason=assignment_reason,
+                    shift=current_shift,
+                    process_status_at_change=self.status
+                )
+                
+                logger.info(
+                    f'Auto-assigned supervisor {assigned_supervisor.get_full_name()} '
+                    f'to process execution {self.id} ({self.process.name} - {current_shift})'
                 )
                 
                 self._update_activity_log()
                 return True
             else:
-                logger.warning(
-                    f'No supervisor status found for work center {self.process.name} '
-                    f'on {today}. Run check_supervisor_attendance command.'
+                # No supervisor available - send notification
+                self._send_no_supervisor_notification(current_shift)
+                logger.error(
+                    f'No supervisor available for {self.mo.mo_id} - '
+                    f'{self.process.name} - {current_shift}. Leaving unassigned.'
                 )
                 return False
+                
         except Exception as e:
             logger.error(f'Error auto-assigning supervisor: {str(e)}', exc_info=True)
             return False
+    
+    def _get_current_shift(self):
+        """Determine current shift based on time"""
+        from processes.models import WorkCenterSupervisorShift
+        
+        current_time = timezone.now().time()
+        
+        # Get shift configurations for this work center
+        shift_configs = WorkCenterSupervisorShift.objects.filter(
+            work_center=self.process,
+            is_active=True
+        ).order_by('shift_start_time')
+        
+        for config in shift_configs:
+            if config.shift_start_time <= current_time < config.shift_end_time:
+                return config.shift
+        
+        # Default to shift_1 if no match
+        return 'shift_1'
+    
+    def _send_no_supervisor_notification(self, shift):
+        """Send notification when no supervisor is available"""
+        from notifications.models import WorkflowNotification
+        from django.contrib.auth import get_user_model
+        
+        User = get_user_model()
+        
+        # Get Production Head and Manager users
+        recipients = User.objects.filter(
+            user_roles__role__name__in=['production_head', 'manager'],
+            user_roles__is_active=True
+        ).distinct()
+        
+        for recipient in recipients:
+            WorkflowNotification.objects.create(
+                user=recipient,
+                notification_type='supervisor_unavailable',
+                title='Action Needed: No Supervisor Available',
+                message=(
+                    f'No supervisor available for MO {self.mo.mo_id} - '
+                    f'Process: {self.process.name} - Shift: {shift}. '
+                    f'Both primary and backup supervisors are unavailable. '
+                    f'Please assign a supervisor manually.'
+                ),
+                priority='high',
+                related_mo=self.mo,
+                action_url=f'/production-head/mo-detail/{self.mo.id}'
+            )
+        
+        logger.info(
+            f'Sent no-supervisor-available notifications for {self.mo.mo_id} - '
+            f'{self.process.name} - {shift}'
+        )
+    
+    def assign_supervisor_manually(self, new_supervisor, changed_by_user, notes=''):
+        """
+        Manually assign/change supervisor mid-process by PH/Manager
+        This fully moves the process to the new supervisor until shift ends or changed again
+        """
+        from manufacturing.models import SupervisorChangeLog
+        
+        old_supervisor = self.assigned_supervisor
+        current_shift = self._get_current_shift()
+        
+        self.assigned_supervisor = new_supervisor
+        self.save(update_fields=['assigned_supervisor', 'updated_at'])
+        
+        # Log the change
+        SupervisorChangeLog.objects.create(
+            mo_process_execution=self,
+            from_supervisor=old_supervisor,
+            to_supervisor=new_supervisor,
+            change_reason='mid_process_change',
+            change_notes=notes,
+            shift=current_shift,
+            process_status_at_change=self.status,
+            changed_by=changed_by_user
+        )
+        
+        logger.info(
+            f'Manually assigned supervisor {new_supervisor.get_full_name()} '
+            f'to process execution {self.id} by {changed_by_user.get_full_name()}'
+        )
+        
+        self._update_activity_log()
+        
+        return True
     
     def _update_activity_log(self):
         """Update supervisor activity log when operations are handled"""

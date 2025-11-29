@@ -53,6 +53,11 @@ from .activity_log import (
     ProcessActivityLog,
     BatchTraceabilityEvent
 )
+from .mo_supervisor_config import (
+    MOShiftConfiguration,
+    MOSupervisorOverride,
+    SupervisorChangeLog
+)
 
 __all__ = [
     # Manufacturing Orders
@@ -107,5 +112,10 @@ __all__ = [
     # Activity Logging
     'ProcessActivityLog',
     'BatchTraceabilityEvent',
+    
+    # MO Supervisor Configuration
+    'MOShiftConfiguration',
+    'MOSupervisorOverride',
+    'SupervisorChangeLog',
 ]
 

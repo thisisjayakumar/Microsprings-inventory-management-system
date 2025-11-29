@@ -49,30 +49,35 @@ class Command(BaseCommand):
         
         self.stdout.write(f"Checking supervisor attendance for {check_date}...")
         
-        # Get all active work centers
-        work_centers = WorkCenterMaster.objects.filter(is_active=True).select_related(
-            'work_center', 'default_supervisor', 'backup_supervisor'
+        # Get all active work center supervisor shifts
+        from processes.models import WorkCenterSupervisorShift
+        
+        shift_configs = WorkCenterSupervisorShift.objects.filter(
+            is_active=True
+        ).select_related(
+            'work_center', 'primary_supervisor', 'backup_supervisor'
         )
         
-        if not work_centers.exists():
-            self.stdout.write(self.style.WARNING('No active work centers found'))
+        if not shift_configs.exists():
+            self.stdout.write(self.style.WARNING('No active work center shift configurations found'))
             return
         
         created_count = 0
         updated_count = 0
         backup_assigned_count = 0
         
-        for wc_master in work_centers:
+        for shift_config in shift_configs:
             try:
-                # Check if status already exists for this date
+                # Check if status already exists for this date and shift
                 status, created = DailySupervisorStatus.objects.get_or_create(
                     date=check_date,
-                    work_center=wc_master.work_center,
+                    work_center=shift_config.work_center,
+                    shift=shift_config.shift,
                     defaults={
-                        'default_supervisor': wc_master.default_supervisor,
-                        'active_supervisor': wc_master.default_supervisor,  # Initially default
+                        'default_supervisor': shift_config.primary_supervisor,
+                        'active_supervisor': shift_config.primary_supervisor,  # Initially primary
                         'is_present': False,
-                        'check_in_deadline': wc_master.check_in_deadline,
+                        'check_in_deadline': shift_config.check_in_deadline,
                     }
                 )
                 
@@ -80,69 +85,69 @@ class Command(BaseCommand):
                     created_count += 1
                     self.stdout.write(
                         self.style.SUCCESS(
-                            f'Created status for {wc_master.work_center.name}'
+                            f'Created status for {shift_config.work_center.name} - {shift_config.shift}'
                         )
                     )
                 elif force:
                     # Force update
-                    status.default_supervisor = wc_master.default_supervisor
-                    status.check_in_deadline = wc_master.check_in_deadline
+                    status.default_supervisor = shift_config.primary_supervisor
+                    status.check_in_deadline = shift_config.check_in_deadline
                     status.save()
                     updated_count += 1
                 
-                # Check if default supervisor has logged in before deadline
+                # Check if primary supervisor has logged in before deadline
                 login_time = self._get_supervisor_login_time(
-                    wc_master.default_supervisor,
+                    shift_config.primary_supervisor,
                     check_date
                 )
                 
                 if login_time:
                     # Compare login time with deadline
-                    deadline_dt = datetime.combine(check_date, wc_master.check_in_deadline)
+                    deadline_dt = datetime.combine(check_date, shift_config.check_in_deadline)
                     login_dt = datetime.combine(check_date, login_time)
                     
                     if login_dt <= deadline_dt:
                         # Supervisor logged in on time
                         status.is_present = True
                         status.login_time = login_time
-                        status.active_supervisor = wc_master.default_supervisor
+                        status.active_supervisor = shift_config.primary_supervisor
                         status.save()
                         
                         self.stdout.write(
-                            f'  ✓ {wc_master.work_center.name}: '
-                            f'{wc_master.default_supervisor.get_full_name()} '
+                            f'  ✓ {shift_config.work_center.name} - {shift_config.shift}: '
+                            f'{shift_config.primary_supervisor.get_full_name()} '
                             f'logged in at {login_time} (on time)'
                         )
                     else:
                         # Supervisor logged in but late
                         status.is_present = False
                         status.login_time = login_time
-                        status.active_supervisor = wc_master.backup_supervisor
+                        status.active_supervisor = shift_config.backup_supervisor
                         status.save()
                         backup_assigned_count += 1
                         
                         self.stdout.write(
                             self.style.WARNING(
-                                f'  ⚠ {wc_master.work_center.name}: '
-                                f'{wc_master.default_supervisor.get_full_name()} '
+                                f'  ⚠ {shift_config.work_center.name} - {shift_config.shift}: '
+                                f'{shift_config.primary_supervisor.get_full_name()} '
                                 f'logged in late at {login_time}. '
-                                f'Backup assigned: {wc_master.backup_supervisor.get_full_name()}'
+                                f'Backup assigned: {shift_config.backup_supervisor.get_full_name()}'
                             )
                         )
                 else:
                     # No login found - assign backup
                     status.is_present = False
                     status.login_time = None
-                    status.active_supervisor = wc_master.backup_supervisor
+                    status.active_supervisor = shift_config.backup_supervisor
                     status.save()
                     backup_assigned_count += 1
                     
                     self.stdout.write(
                         self.style.WARNING(
-                            f'  ✗ {wc_master.work_center.name}: '
-                            f'{wc_master.default_supervisor.get_full_name()} '
+                            f'  ✗ {shift_config.work_center.name} - {shift_config.shift}: '
+                            f'{shift_config.primary_supervisor.get_full_name()} '
                             f'not logged in. '
-                            f'Backup assigned: {wc_master.backup_supervisor.get_full_name()}'
+                            f'Backup assigned: {shift_config.backup_supervisor.get_full_name()}'
                         )
                     )
                 
@@ -152,7 +157,7 @@ class Command(BaseCommand):
             except Exception as e:
                 self.stdout.write(
                     self.style.ERROR(
-                        f'Error processing {wc_master.work_center.name}: {str(e)}'
+                        f'Error processing {shift_config.work_center.name} - {shift_config.shift}: {str(e)}'
                     )
                 )
                 logger.error(f'Error in check_supervisor_attendance: {str(e)}', exc_info=True)
@@ -160,7 +165,7 @@ class Command(BaseCommand):
         # Summary
         self.stdout.write(self.style.SUCCESS('\n=== Summary ==='))
         self.stdout.write(f'Date: {check_date}')
-        self.stdout.write(f'Total work centers: {work_centers.count()}')
+        self.stdout.write(f'Total shift configurations: {shift_configs.count()}')
         self.stdout.write(f'New statuses created: {created_count}')
         self.stdout.write(f'Existing statuses updated: {updated_count}')
         self.stdout.write(f'Backup supervisors assigned: {backup_assigned_count}')

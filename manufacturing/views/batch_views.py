@@ -299,7 +299,7 @@ class BatchProcessExecutionViewSet(viewsets.ViewSet):
             if f"{batch_proc_key}:completed;" in (mo_batch.notes or ""):
                 completed_batches += 1
         
-        # Calculate progress percentage
+        # Calculate progress percentage based on batch completion
         if total_batches > 0:
             progress_percentage = (completed_batches / total_batches) * 100
             process_execution.progress_percentage = progress_percentage
@@ -314,12 +314,21 @@ class BatchProcessExecutionViewSet(viewsets.ViewSet):
             )
             
             if should_complete_process:
-                process_execution.status = 'completed'
-                process_execution.actual_end_time = timezone.now()
+                # Only mark as completed if not already completed, or if already completed but progress should be 100%
+                if process_execution.status != 'completed':
+                    process_execution.status = 'completed'
+                    process_execution.actual_end_time = timezone.now()
+                # Always set progress to 100 when all batches are completed
                 process_execution.progress_percentage = 100
                 print(f"Process {process_execution.id} completed: RM batched {rm_batched_percentage}% >= 90%")
             else:
-                print(f"Process {process_execution.id} not completed yet: RM batched {rm_batched_percentage}% < 90% or batches incomplete")
+                # If not all batches completed, ensure status is in_progress and progress reflects actual completion
+                if process_execution.status == 'completed':
+                    # Process was completed but new batches were added, revert to in_progress
+                    process_execution.status = 'in_progress'
+                    process_execution.actual_end_time = None
+                # Progress percentage already calculated above based on batch completion
+                print(f"Process {process_execution.id} not completed yet: {completed_batches}/{total_batches} batches completed ({progress_percentage}%), RM batched {rm_batched_percentage}%")
             
             process_execution.save()
         else:

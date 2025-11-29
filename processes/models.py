@@ -266,7 +266,7 @@ class WorkCenterMaster(models.Model):
 
 class DailySupervisorStatus(models.Model):
     """
-    Auto-generated daily record of supervisor status for each work center
+    Auto-generated daily record of supervisor status for each work center and shift
     Tracks whether default supervisor is present and who is the active supervisor
     """
     date = models.DateField(help_text="Date of this status record")
@@ -276,11 +276,16 @@ class DailySupervisorStatus(models.Model):
         related_name='daily_supervisor_status',
         help_text="Work center for this status"
     )
+    shift = models.CharField(
+        max_length=10,
+        choices=[('shift_1', 'Shift 1'), ('shift_2', 'Shift 2'), ('shift_3', 'Shift 3')],
+        help_text="Shift for this status record"
+    )
     default_supervisor = models.ForeignKey(
         User,
         on_delete=models.PROTECT,
         related_name='daily_default_supervisor_status',
-        help_text="Default supervisor for this work center on this date"
+        help_text="Default supervisor for this work center on this date and shift"
     )
     is_present = models.BooleanField(
         default=False,
@@ -290,7 +295,7 @@ class DailySupervisorStatus(models.Model):
         User,
         on_delete=models.PROTECT,
         related_name='daily_active_supervisor_status',
-        help_text="Active supervisor for this work center today (default or backup)"
+        help_text="Active supervisor for this work center today in this shift (default or backup)"
     )
     
     # Login tracking
@@ -325,10 +330,10 @@ class DailySupervisorStatus(models.Model):
     class Meta:
         verbose_name = 'Daily Supervisor Status'
         verbose_name_plural = 'Daily Supervisor Statuses'
-        ordering = ['-date', 'work_center__name']
-        unique_together = [['date', 'work_center']]
+        ordering = ['-date', 'work_center__name', 'shift']
+        unique_together = [['date', 'work_center', 'shift']]
         indexes = [
-            models.Index(fields=['date', 'work_center']),
+            models.Index(fields=['date', 'work_center', 'shift']),
             models.Index(fields=['date', 'is_present']),
         ]
     
@@ -403,3 +408,103 @@ class SupervisorActivityLog(models.Model):
     
     def __str__(self):
         return f"{self.date} - {self.work_center.name} - {self.active_supervisor.get_full_name()}"
+
+
+class WorkCenterSupervisorShift(models.Model):
+    """
+    Shift-based supervisor assignments for work centers
+    PH sets primary + backup supervisor for each process for each shift
+    This is the global default that applies to all MOs unless overridden
+    """
+    work_center = models.ForeignKey(
+        Process,
+        on_delete=models.CASCADE,
+        related_name='supervisor_shifts',
+        help_text="Process (work center) for this supervisor assignment"
+    )
+    shift = models.CharField(
+        max_length=10,
+        choices=[('shift_1', 'Shift 1'), ('shift_2', 'Shift 2'), ('shift_3', 'Shift 3')],
+        help_text="Shift for this supervisor assignment"
+    )
+    
+    # Shift timing
+    shift_start_time = models.TimeField(help_text="Shift start time (e.g., 09:00)")
+    shift_end_time = models.TimeField(help_text="Shift end time (e.g., 17:00)")
+    
+    # Supervisor assignments for this shift
+    primary_supervisor = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='primary_shift_assignments',
+        help_text="Primary supervisor for this work center in this shift"
+    )
+    backup_supervisor = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        related_name='backup_shift_assignments',
+        help_text="Backup supervisor for this work center in this shift"
+    )
+    
+    # Check-in settings per shift
+    check_in_deadline = models.TimeField(
+        help_text="Time by which primary supervisor should log in for this shift"
+    )
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    
+    # Audit
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_shift_assignments'
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_shift_assignments'
+    )
+    
+    class Meta:
+        verbose_name = 'Work Center Supervisor Shift'
+        verbose_name_plural = 'Work Center Supervisor Shifts'
+        ordering = ['work_center__name', 'shift']
+        unique_together = [['work_center', 'shift']]
+        indexes = [
+            models.Index(fields=['work_center', 'shift', 'is_active']),
+        ]
+    
+    def __str__(self):
+        return f"{self.work_center.name} - {self.shift} - {self.primary_supervisor.get_full_name()}"
+    
+    def clean(self):
+        """Validate that primary and backup supervisors are different"""
+        if self.primary_supervisor == self.backup_supervisor:
+            raise ValidationError("Primary and backup supervisors must be different users")
+        
+        # Validate that both users have supervisor role
+        if not self.primary_supervisor.user_roles.filter(role__name='supervisor', is_active=True).exists():
+            raise ValidationError(f"{self.primary_supervisor.get_full_name()} is not assigned as a supervisor")
+        
+        if not self.backup_supervisor.user_roles.filter(role__name='supervisor', is_active=True).exists():
+            raise ValidationError(f"{self.backup_supervisor.get_full_name()} is not assigned as a supervisor")
+    
+    @property
+    def current_active_supervisor(self):
+        """Get the current active supervisor for this shift today"""
+        today = timezone.now().date()
+        status = DailySupervisorStatus.objects.filter(
+            date=today,
+            work_center=self.work_center,
+            shift=self.shift
+        ).first()
+        
+        if status:
+            return status.active_supervisor
+        return self.primary_supervisor  # Default to primary if no status yet

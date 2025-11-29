@@ -24,6 +24,13 @@ from .views.supervisor_views import (
     BatchTraceabilityViewSet,
     ReworkAnalyticsViewSet
 )
+from .views.supervisor_config_views import (
+    WorkCenterSupervisorShiftViewSet,
+    DailySupervisorStatusViewSet,
+    MOSupervisorConfigViewSet,
+    SupervisorChangeLogViewSet,
+    SupervisorReportViewSet
+)
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -48,6 +55,13 @@ router.register(r'fi-reworks', FinalInspectionReworkViewSet, basename='fi-rework
 router.register(r'activity-logs', ProcessActivityLogViewSet, basename='activity-log')
 router.register(r'batch-traceability', BatchTraceabilityViewSet, basename='batch-traceability')
 router.register(r'rework-analytics', ReworkAnalyticsViewSet, basename='rework-analytics')
+
+# Supervisor Configuration ViewSets
+router.register(r'supervisor-shifts', WorkCenterSupervisorShiftViewSet, basename='supervisor-shift')
+router.register(r'daily-supervisor-status', DailySupervisorStatusViewSet, basename='daily-supervisor-status')
+router.register(r'mo-supervisor-config', MOSupervisorConfigViewSet, basename='mo-supervisor-config')
+router.register(r'supervisor-change-logs', SupervisorChangeLogViewSet, basename='supervisor-change-log')
+router.register(r'supervisor-reports', SupervisorReportViewSet, basename='supervisor-report')
 
 app_name = 'manufacturing'
 

@@ -21,6 +21,15 @@ from authentication.permissions import IsAdminOrManager, IsManagerOrAbove
 logger = logging.getLogger(__name__)
 
 
+class ProcessViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for listing processes (read-only)
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = Process.objects.filter(is_active=True).order_by('name')
+    serializer_class = ProcessBasicSerializer
+
+
 class WorkCenterMasterViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Work Center Master management

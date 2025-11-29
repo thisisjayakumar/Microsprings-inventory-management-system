@@ -357,7 +357,7 @@ class RMAllocationService:
         Returns:
             dict with lock results
         """
-        from .models import Batch
+        from manufacturing.models import Batch
         
         logger.info(f"[DEBUG] lock_allocations_for_batch - Starting for batch {batch.batch_id}")
         
