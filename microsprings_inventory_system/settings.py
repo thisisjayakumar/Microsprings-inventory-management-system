@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     # Third party apps
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',  # For JWT token blacklisting on logout
     'corsheaders',
     'django_filters',
     

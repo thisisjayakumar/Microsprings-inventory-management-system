@@ -1125,6 +1125,46 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             # since supervisors are no longer assigned at MO level
             # Note: Notification system can be implemented later using Alert model
         
+        # Recalculate process progress for all process executions when a new batch is created
+        # This ensures that if a process was marked as completed, adding a new batch will update the progress
+        # Progress should decrease when a new batch is added (e.g., 1/1=100% → 1/2=50%)
+        try:
+            process_executions = mo.process_executions.all()
+            mo_batches = mo.batches.exclude(status='cancelled')
+            total_batches = mo_batches.count()
+            
+            for execution in process_executions:
+                # Count batches that have completed this process
+                completed_batches = 0
+                for mo_batch in mo_batches:
+                    batch_proc_key = f"PROCESS_{execution.id}_STATUS"
+                    if f"{batch_proc_key}:completed;" in (mo_batch.notes or ""):
+                        completed_batches += 1
+                
+                # Calculate progress percentage based on batch completion
+                if total_batches > 0:
+                    progress_percentage = (completed_batches / total_batches) * 100
+                    execution.progress_percentage = progress_percentage
+                    
+                    # If process was completed but new batch added, revert to in_progress
+                    if execution.status == 'completed' and completed_batches < total_batches:
+                        execution.status = 'in_progress'
+                        execution.actual_end_time = None
+                        logger.info(
+                            f"Process {execution.id} ({execution.process.name}) reverted from completed to in_progress "
+                            f"because new batch was added. Progress: {completed_batches}/{total_batches} = {progress_percentage}%"
+                        )
+                    else:
+                        logger.info(
+                            f"Updated process {execution.id} ({execution.process.name}) progress: "
+                            f"{completed_batches}/{total_batches} = {progress_percentage}%"
+                        )
+                    
+                    execution.save(update_fields=['progress_percentage', 'status', 'actual_end_time'])
+        except Exception as e:
+            logger.error(f"Error updating process progress after batch creation: {e}", exc_info=True)
+            # Don't fail batch creation if progress update fails
+        
         return batch
     
     def update(self, instance, validated_data):

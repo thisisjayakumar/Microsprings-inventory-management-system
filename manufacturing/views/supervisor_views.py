@@ -76,86 +76,167 @@ class ProcessStopViewSet(viewsets.ModelViewSet):
         return queryset.none()
     
     def create(self, request):
-        """Stop a process"""
+        """Stop a process - creates ProcessStop for all active batches in the process"""
         serializer = ProcessStopCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
         validated_data = serializer.validated_data
-        batch = validated_data['batch']
+        batches = validated_data['batches']  # List of batches to stop
         process_execution = validated_data['process_execution']
+        mo = process_execution.mo
         
-        # Create process stop
+        # Check if process is already stopped
+        if process_execution.status == 'stopped':
+            # Check if there are any active (non-resumed) stops
+            active_stops = ProcessStop.objects.filter(
+                process_execution=process_execution,
+                is_resumed=False
+            ).exists()
+            
+            if active_stops:
+                return Response(
+                    {'error': 'Process is already stopped. Please resume it first before stopping again.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Check for active stops for any of these batches
+        active_stops = ProcessStop.objects.filter(
+            batch__in=batches,
+            process_execution=process_execution,
+            is_resumed=False
+        )
+        
+        if active_stops.exists():
+            stopped_batches = [stop.batch.batch_id for stop in active_stops]
+            return Response(
+                {'error': f'Process already has active stops for batches: {", ".join(stopped_batches)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create process stops for all batches
+        created_stops = []
         with transaction.atomic():
-            process_stop = ProcessStop.objects.create(
-                batch=batch,
-                mo=batch.mo,
-                process_execution=process_execution,
-                stopped_by=request.user,
-                stop_reason=validated_data['stop_reason'],
-                stop_reason_detail=validated_data.get('stop_reason_detail', '')
-            )
+            for batch in batches:
+                process_stop = ProcessStop.objects.create(
+                    batch=batch,
+                    mo=mo,
+                    process_execution=process_execution,
+                    stopped_by=request.user,
+                    stop_reason=validated_data['stop_reason'],
+                    stop_reason_detail=validated_data.get('stop_reason_detail', '')
+                )
+                created_stops.append(process_stop)
+                
+                # Log activity for each batch
+                ProcessActivityLog.log_process_stop(
+                    process_execution=process_execution,
+                    batch=batch,
+                    user=request.user,
+                    reason=validated_data['stop_reason'],
+                    reason_detail=validated_data.get('stop_reason_detail', '')
+                )
             
-            # Update process execution status
-            process_execution.status = 'stopped'
-            process_execution.save()
+            # Update process execution status to stopped
+            if process_execution.status != 'stopped':
+                process_execution.status = 'stopped'
+                process_execution.save(update_fields=['status', 'updated_at'])
             
-            # Log activity
-            ProcessActivityLog.log_process_stop(
-                process_execution=process_execution,
-                batch=batch,
-                user=request.user,
-                reason=validated_data['stop_reason'],
-                reason_detail=validated_data.get('stop_reason_detail', '')
-            )
-            
-            # Send notifications to PH and Manager
-            self._send_stop_notifications(process_stop)
+            # Send notifications to PH and Manager (only once, using first stop)
+            if created_stops:
+                self._send_stop_notifications(created_stops[0])
         
+        # Return the first stop (or all stops if needed)
         return Response(
-            ProcessStopSerializer(process_stop).data,
+            {
+                'message': f'Process stopped successfully for {len(created_stops)} batch(es)',
+                'process_stop': ProcessStopSerializer(created_stops[0]).data,
+                'batches_stopped': [stop.batch.batch_id for stop in created_stops],
+                'total_stops': len(created_stops)
+            },
             status=status.HTTP_201_CREATED
         )
     
     @action(detail=True, methods=['post'])
     def resume(self, request, pk=None):
-        """Resume a stopped process"""
+        """Resume a stopped process - resumes all active stops for this process execution"""
         process_stop = self.get_object()
         
         if process_stop.is_resumed:
             return Response(
-                {'error': 'Process is already resumed'},
+                {'error': 'This process stop is already resumed'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         serializer = ProcessResumeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
+        process_execution = process_stop.process_execution
+        resume_notes = serializer.validated_data.get('resume_notes', '')
+        
+        # Find all active (non-resumed) stops for this process execution
+        active_stops = ProcessStop.objects.filter(
+            process_execution=process_execution,
+            is_resumed=False
+        )
+        
+        if not active_stops.exists():
+            return Response(
+                {'error': 'No active stops found for this process'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        resumed_stops = []
+        total_downtime = 0
+        
         with transaction.atomic():
-            # Resume process
-            downtime_minutes = process_stop.resume_process(
-                resumed_by_user=request.user,
-                notes=serializer.validated_data.get('resume_notes', '')
-            )
+            # Resume all active stops for this process
+            for stop in active_stops:
+                downtime_minutes = stop.resume_process(
+                    resumed_by_user=request.user,
+                    notes=resume_notes
+                )
+                resumed_stops.append(stop)
+                total_downtime += downtime_minutes
+                
+                # Log activity for each batch
+                ProcessActivityLog.log_process_resume(
+                    process_execution=process_execution,
+                    batch=stop.batch,
+                    user=request.user,
+                    downtime_minutes=downtime_minutes
+                )
             
-            # Log activity
-            ProcessActivityLog.log_process_resume(
-                process_execution=process_stop.process_execution,
-                batch=process_stop.batch,
-                user=request.user,
-                downtime_minutes=downtime_minutes
-            )
+            # Update process execution status back to in_progress
+            # Only if all stops are resumed
+            if process_execution.status == 'stopped':
+                # Check if there are any remaining active stops
+                remaining_stops = ProcessStop.objects.filter(
+                    process_execution=process_execution,
+                    is_resumed=False
+                ).exists()
+                
+                if not remaining_stops:
+                    process_execution.status = 'in_progress'
+                    process_execution.save(update_fields=['status', 'updated_at'])
             
             # Update downtime summary
             ProcessDowntimeSummary.update_summary(
                 date=process_stop.stopped_at.date(),
-                process=process_stop.process_execution.process
+                process=process_execution.process
             )
             
-            # Send notifications
-            self._send_resume_notifications(process_stop)
+            # Send notifications (only once, using first resumed stop)
+            if resumed_stops:
+                self._send_resume_notifications(resumed_stops[0])
         
         return Response(
-            ProcessStopSerializer(process_stop).data,
+            {
+                'message': f'Process resumed successfully for {len(resumed_stops)} batch(es)',
+                'process_stop': ProcessStopSerializer(resumed_stops[0]).data,
+                'batches_resumed': [stop.batch.batch_id for stop in resumed_stops],
+                'total_resumed': len(resumed_stops),
+                'total_downtime_minutes': total_downtime
+            },
             status=status.HTTP_200_OK
         )
     

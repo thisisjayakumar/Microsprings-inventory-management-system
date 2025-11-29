@@ -747,6 +747,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         
         # Create process executions
         sequence = 1
+        created_executions = []
         for process in unique_processes.values():
             
             # Check if execution already exists
@@ -761,6 +762,37 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             
             if created:
                 sequence += 1
+                created_executions.append(execution)
+        
+        # Auto-assign supervisors to newly created process executions
+        from notifications.models import WorkflowNotification
+        for execution in created_executions:
+            try:
+                execution.auto_assign_supervisor()
+                logger.info(
+                    f"Auto-assigned supervisor for {mo.mo_id} - {execution.process.name}: "
+                    f"{execution.assigned_supervisor.get_full_name() if execution.assigned_supervisor else 'None'}"
+                )
+                
+                # Send notification to the assigned supervisor
+                if execution.assigned_supervisor:
+                    WorkflowNotification.objects.create(
+                        notification_type='supervisor_assigned',
+                        title=f'Process Assigned: {execution.process.name}',
+                        message=f'You have been automatically assigned as supervisor for process "{execution.process.name}" for MO {mo.mo_id}.',
+                        recipient=execution.assigned_supervisor,
+                        related_mo=mo,
+                        action_required=True,
+                        created_by=request.user
+                    )
+                    logger.info(
+                        f"Sent notification to {execution.assigned_supervisor.get_full_name()} "
+                        f"for {mo.mo_id} - {execution.process.name}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error auto-assigning supervisor for {mo.mo_id} - {execution.process.name}: {str(e)}"
+                )
         
         # Update MO status and actual start date if not already in_progress
         # NOTE: Do NOT allocate RM here - RM will be reserved when production actually starts
@@ -2038,6 +2070,9 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
             mo_batches = mo.batches.exclude(status='cancelled')
             
             if not mo_batches.exists():
+                # No batches, set progress to 0
+                execution.progress_percentage = 0
+                execution.save()
                 return
             
             # Count batches that have completed this process
@@ -2053,6 +2088,12 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
             if total_batches > 0:
                 progress_percentage = (completed_batches / total_batches) * 100
                 execution.progress_percentage = progress_percentage
+                
+                # If process was completed but not all batches are completed, revert to in_progress
+                if execution.status == 'completed' and completed_batches < total_batches:
+                    execution.status = 'in_progress'
+                    execution.actual_end_time = None
+                
                 execution.save()
                 
         except Exception as e:
@@ -2365,6 +2406,53 @@ class BatchViewSet(viewsets.ModelViewSet):
         except Exception as e:
             print(f"Error creating batch allocation transaction: {e}")
             # Don't fail batch creation if transaction fails
+        
+        # Recalculate process progress for all process executions when a new batch is created
+        # This ensures that if a process was marked as completed, adding a new batch will update the progress
+        # Progress should decrease when a new batch is added (e.g., 1/1=100% → 1/2=50%)
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            process_executions = batch.mo.process_executions.all()
+            mo_batches = batch.mo.batches.exclude(status='cancelled')
+            total_batches = mo_batches.count()
+            
+            for execution in process_executions:
+                # Count batches that have completed this process
+                completed_batches = 0
+                for mo_batch in mo_batches:
+                    batch_proc_key = f"PROCESS_{execution.id}_STATUS"
+                    if f"{batch_proc_key}:completed;" in (mo_batch.notes or ""):
+                        completed_batches += 1
+                
+                # Calculate progress percentage based on batch completion
+                if total_batches > 0:
+                    progress_percentage = (completed_batches / total_batches) * 100
+                    old_progress = execution.progress_percentage
+                    execution.progress_percentage = progress_percentage
+                    
+                    # If process was completed but new batch added, revert to in_progress
+                    if execution.status == 'completed' and completed_batches < total_batches:
+                        execution.status = 'in_progress'
+                        execution.actual_end_time = None
+                        logger.info(
+                            f"[Batch Creation] Process {execution.id} ({execution.process.name}) reverted from completed to in_progress "
+                            f"because new batch {batch.batch_id} was added. Progress: {old_progress}% → {progress_percentage}% "
+                            f"({completed_batches}/{total_batches} batches completed)"
+                        )
+                    else:
+                        logger.info(
+                            f"[Batch Creation] Updated process {execution.id} ({execution.process.name}) progress: "
+                            f"{old_progress}% → {progress_percentage}% ({completed_batches}/{total_batches} batches completed)"
+                        )
+                    
+                    execution.save(update_fields=['progress_percentage', 'status', 'actual_end_time'])
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error updating process progress after batch creation: {e}", exc_info=True)
+            # Don't fail batch creation if progress update fails
 
     @action(detail=False, methods=['get'], url_path='mo-batch-summary/(?P<mo_id>[^/.]+)')
     def mo_batch_summary(self, request, mo_id=None):

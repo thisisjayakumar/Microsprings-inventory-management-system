@@ -56,29 +56,77 @@ class ProcessStopSerializer(serializers.ModelSerializer):
 
 class ProcessStopCreateSerializer(serializers.Serializer):
     """Serializer for creating process stop"""
-    batch_id = serializers.IntegerField()
+    batch_id = serializers.IntegerField(required=False, allow_null=True)
     process_execution_id = serializers.IntegerField()
     stop_reason = serializers.ChoiceField(choices=ProcessStop._meta.get_field('stop_reason').choices)
     stop_reason_detail = serializers.CharField(required=False, allow_blank=True)
     
     def validate(self, data):
-        # Validate batch exists
-        try:
-            batch = Batch.objects.get(id=data['batch_id'])
-            data['batch'] = batch
-        except Batch.DoesNotExist:
-            raise serializers.ValidationError({'batch_id': 'Batch not found'})
+        # Validate process execution first
+        process_execution_id = data.get('process_execution_id')
+        if process_execution_id is None:
+            raise serializers.ValidationError({'process_execution_id': 'process_execution_id is required'})
         
-        # Validate process execution
         try:
-            process_execution = MOProcessExecution.objects.get(id=data['process_execution_id'])
+            process_execution = MOProcessExecution.objects.select_related('mo', 'process').get(id=process_execution_id)
             data['process_execution'] = process_execution
         except MOProcessExecution.DoesNotExist:
-            raise serializers.ValidationError({'process_execution_id': 'Process execution not found'})
+            raise serializers.ValidationError({
+                'process_execution_id': f'Process execution with id {process_execution_id} not found. Please verify it exists.'
+            })
+        except (ValueError, TypeError) as e:
+            raise serializers.ValidationError({
+                'process_execution_id': f'Invalid process_execution_id format: {process_execution_id}. Expected an integer.'
+            })
         
-        # Validate process execution belongs to batch's MO
-        if process_execution.mo != batch.mo:
-            raise serializers.ValidationError('Process execution does not belong to batch MO')
+        # Get all active batches for this process's MO
+        # Active batches are those that are allocated but not cancelled or completed
+        # This includes: created, in_process, in_progress (not yet completed)
+        mo = process_execution.mo
+        active_batches = mo.batches.exclude(status__in=['cancelled', 'completed', 'returned_to_rm'])
+        
+        # If batch_id is provided, validate it exists
+        batch_id = data.get('batch_id')
+        if batch_id is not None:
+            try:
+                # Get the batch - no need to validate MO relationship
+                # Because all batches for an MO can be stopped via any process execution for that MO
+                batch = Batch.objects.get(id=batch_id)
+                
+                # Validate batch is in active_batches (belongs to the same MO)
+                if batch not in active_batches:
+                    raise serializers.ValidationError({
+                        'batch_id': f'Batch {batch_id} (Batch ID: {batch.batch_id}) does not belong to MO {mo.mo_id}. This process execution is for MO {mo.mo_id}.'
+                    })
+                
+                # Use the specified batch
+                data['batches'] = [batch]
+            except Batch.DoesNotExist:
+                # If batch doesn't exist, fall back to stopping all active batches
+                # This handles cases where batch was deleted or invalid ID was provided
+                if not active_batches.exists():
+                    raise serializers.ValidationError({
+                        'batch_id': f'Batch with id {batch_id} not found, and no active batches found for MO {mo.mo_id}.'
+                    })
+                # Use all active batches instead
+                data['batches'] = list(active_batches)
+                # Optionally add a warning (for logging)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f'Batch {batch_id} not found for process_execution {process_execution_id}. Stopping all active batches for MO {mo.mo_id} instead.')
+            except (ValueError, TypeError) as e:
+                raise serializers.ValidationError({
+                    'batch_id': f'Invalid batch_id format: {batch_id}. Expected an integer.'
+                })
+        else:
+            # No batch_id provided - stop process for all active batches
+            if not active_batches.exists():
+                raise serializers.ValidationError({
+                    'batch_id': f'No active batches found for MO {mo.mo_id}. Cannot stop process without active batches.'
+                })
+            data['batches'] = list(active_batches)
+        
+        return data
         
         # Check if already stopped
         if process_execution.status == 'stopped':

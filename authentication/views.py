@@ -134,14 +134,353 @@ def register_user(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+def _reassign_supervisor_work(supervisor_user):
+    """
+    Helper function to reassign all process executions when a supervisor logs out
+    Returns a summary of reassignments
+    """
+    from manufacturing.models import MOProcessExecution
+    from processes.models import WorkCenterSupervisorShift, DailySupervisorStatus
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    reassignment_summary = []
+    
+    # Find all process executions currently assigned to this supervisor
+    assigned_executions = MOProcessExecution.objects.filter(
+        assigned_supervisor=supervisor_user,
+        status__in=['pending', 'in_progress', 'on_hold']
+    ).select_related('mo', 'process')
+    
+    if not assigned_executions.exists():
+        logger.info(f"No active process executions found for supervisor {supervisor_user.get_full_name()}")
+        return reassignment_summary
+    
+    logger.info(f"Found {assigned_executions.count()} process executions assigned to {supervisor_user.get_full_name()}")
+    
+    for execution in assigned_executions:
+        try:
+            # Get the current shift
+            current_shift = execution._get_current_shift()
+            
+            # Find backup supervisor for this work center and shift
+            backup_supervisor = _find_backup_supervisor(
+                execution.process,
+                current_shift,
+                supervisor_user,
+                execution.mo
+            )
+            
+            old_supervisor = execution.assigned_supervisor.get_full_name() if execution.assigned_supervisor else 'None'
+            
+            if backup_supervisor:
+                # Check if backup supervisor is currently logged in
+                is_backup_logged_in = LoginSession.objects.filter(
+                    user=backup_supervisor,
+                    is_active=True,
+                    logout_time__isnull=True
+                ).exists()
+                
+                if is_backup_logged_in:
+                    execution.assigned_supervisor = backup_supervisor
+                    execution.save(update_fields=['assigned_supervisor', 'updated_at'])
+                    
+                    new_supervisor = backup_supervisor.get_full_name()
+                    logger.info(
+                        f"Reassigned {execution.mo.mo_id} - {execution.process.name}: "
+                        f"{old_supervisor} → {new_supervisor}"
+                    )
+                    
+                    reassignment_summary.append({
+                        'mo_id': execution.mo.mo_id,
+                        'process': execution.process.name,
+                        'old_supervisor': old_supervisor,
+                        'new_supervisor': new_supervisor,
+                        'status': 'reassigned_to_backup'
+                    })
+                    
+                    # Log the change
+                    _log_supervisor_change(
+                        execution,
+                        supervisor_user,
+                        backup_supervisor,
+                        'attendance_absence',
+                        f"Automatic reassignment due to {old_supervisor} logout",
+                        shift=current_shift
+                    )
+                    
+                    # Send notification to backup supervisor
+                    _notify_supervisor_reassignment(
+                        execution,
+                        backup_supervisor,
+                        old_supervisor
+                    )
+                else:
+                    # Backup supervisor is also logged out, set to None
+                    execution.assigned_supervisor = None
+                    execution.save(update_fields=['assigned_supervisor', 'updated_at'])
+                    
+                    logger.warning(
+                        f"Backup supervisor {backup_supervisor.get_full_name()} is not logged in. "
+                        f"Setting {execution.mo.mo_id} - {execution.process.name} supervisor to None"
+                    )
+                    
+                    reassignment_summary.append({
+                        'mo_id': execution.mo.mo_id,
+                        'process': execution.process.name,
+                        'old_supervisor': old_supervisor,
+                        'new_supervisor': 'None',
+                        'status': 'unassigned_backup_unavailable'
+                    })
+                    
+                    # Note: Not logging to SupervisorChangeLog when setting to None
+                    # SupervisorChangeLog requires to_supervisor (cannot be null)
+                    # The unassignment is tracked via process execution status and notifications
+                    
+                    # Send notification to production head
+                    _notify_production_head_unassigned_process(execution, supervisor_user)
+            else:
+                # No backup supervisor configured, set to None
+                execution.assigned_supervisor = None
+                execution.save(update_fields=['assigned_supervisor', 'updated_at'])
+                
+                logger.warning(
+                    f"No backup supervisor found for {execution.mo.mo_id} - {execution.process.name}. "
+                    f"Setting supervisor to None"
+                )
+                
+                reassignment_summary.append({
+                    'mo_id': execution.mo.mo_id,
+                    'process': execution.process.name,
+                    'old_supervisor': old_supervisor,
+                    'new_supervisor': 'None',
+                    'status': 'unassigned_no_backup'
+                })
+                
+                # Note: Not logging to SupervisorChangeLog when setting to None
+                # SupervisorChangeLog requires to_supervisor (cannot be null)
+                # The unassignment is tracked via process execution status and notifications
+                
+                # Send notification to production head
+                _notify_production_head_unassigned_process(execution, supervisor_user)
+                
+        except Exception as e:
+            logger.error(
+                f"Error reassigning process execution {execution.id} "
+                f"({execution.mo.mo_id} - {execution.process.name}): {str(e)}",
+                exc_info=True
+            )
+            reassignment_summary.append({
+                'mo_id': execution.mo.mo_id,
+                'process': execution.process.name,
+                'status': 'error',
+                'error': str(e)
+            })
+    
+    return reassignment_summary
+
+
+def _find_backup_supervisor(work_center, shift, primary_supervisor, mo=None):
+    """
+    Find the backup supervisor for a given work center and shift
+    Priority:
+    1. MO-specific override backup
+    2. Work center shift backup
+    """
+    from manufacturing.models import MOSupervisorOverride
+    from processes.models import WorkCenterSupervisorShift
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Check for MO-specific override
+    if mo:
+        mo_override = MOSupervisorOverride.objects.filter(
+            mo=mo,
+            process=work_center,
+            shift=shift,
+            is_active=True
+        ).select_related('backup_supervisor').first()
+        
+        if mo_override and mo_override.backup_supervisor:
+            logger.info(f"Found MO-specific backup supervisor: {mo_override.backup_supervisor.get_full_name()}")
+            return mo_override.backup_supervisor
+    
+    # Check work center shift configuration
+    shift_config = WorkCenterSupervisorShift.objects.filter(
+        work_center=work_center,
+        shift=shift,
+        is_active=True
+    ).select_related('backup_supervisor', 'primary_supervisor').first()
+    
+    if shift_config:
+        # If the primary supervisor matches the one logging out, return backup
+        if shift_config.primary_supervisor == primary_supervisor:
+            logger.info(f"Found work center backup supervisor: {shift_config.backup_supervisor.get_full_name()}")
+            return shift_config.backup_supervisor
+        # If the backup is logging out, no further backup available
+        elif shift_config.backup_supervisor == primary_supervisor:
+            logger.warning(f"Backup supervisor {primary_supervisor.get_full_name()} is logging out, no further backup available")
+            return None
+    
+    return None
+
+
+def _log_supervisor_change(execution, old_supervisor, new_supervisor, reason, notes, shift=None):
+    """
+    Log supervisor change in SupervisorChangeLog
+    Note: Only logs when new_supervisor is not None (SupervisorChangeLog.to_supervisor is required)
+    """
+    from manufacturing.models import SupervisorChangeLog
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Skip logging if new_supervisor is None since to_supervisor field is required
+    if new_supervisor is None:
+        logger.info(
+            f"Skipping supervisor change log for {execution.mo.mo_id} - {execution.process.name}: "
+            f"Process set to unassigned (no new supervisor to log)"
+        )
+        return
+    
+    try:
+        SupervisorChangeLog.objects.create(
+            mo_process_execution=execution,
+            from_supervisor=old_supervisor,
+            to_supervisor=new_supervisor,
+            change_reason=reason,
+            change_notes=notes,
+            shift=shift,
+            process_status_at_change=execution.status,
+            changed_by=None  # System-generated during logout
+        )
+        from_name = old_supervisor.get_full_name() if old_supervisor else 'Unassigned'
+        to_name = new_supervisor.get_full_name()
+        logger.info(
+            f"Logged supervisor change for {execution.mo.mo_id} - {execution.process.name}: "
+            f"{from_name} → {to_name}"
+        )
+    except Exception as e:
+        logger.error(f"Error creating supervisor change log: {str(e)}")
+
+
+def _notify_supervisor_reassignment(execution, new_supervisor, old_supervisor_name):
+    """
+    Send notification to supervisor when they are reassigned process work
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        from notifications.models import WorkflowNotification
+        
+        WorkflowNotification.objects.create(
+            notification_type='supervisor_assigned',
+            title=f'Process Reassigned: {execution.process.name}',
+            message=(
+                f'You have been reassigned as supervisor for process "{execution.process.name}" '
+                f'for MO {execution.mo.mo_id}. '
+                f'Previous supervisor {old_supervisor_name} has logged out.'
+            ),
+            recipient=new_supervisor,
+            related_mo=execution.mo,
+            action_required=True,
+            created_by=None  # System-generated
+        )
+        
+        logger.info(
+            f"Sent reassignment notification to {new_supervisor.get_full_name()} "
+            f"for {execution.mo.mo_id} - {execution.process.name}"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error sending notification to supervisor: {str(e)}")
+
+
+def _notify_production_head_unassigned_process(execution, logged_out_supervisor):
+    """
+    Send notification to production heads and managers when a process becomes unassigned
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Import inside function to avoid circular imports
+        from notifications.models import WorkflowNotification
+        
+        # Get all production heads and managers
+        production_heads = CustomUser.objects.filter(
+            user_roles__role__name='production_head',
+            user_roles__is_active=True,
+            is_active=True
+        ).distinct()
+        
+        managers = CustomUser.objects.filter(
+            user_roles__role__name='manager',
+            user_roles__is_active=True,
+            is_active=True
+        ).distinct()
+        
+        # Combine both groups
+        recipients = list(production_heads) + list(managers)
+        
+        notification_message = (
+            f"⚠️ URGENT: Process {execution.process.name} for MO {execution.mo.mo_id} is now UNASSIGNED.\n\n"
+            f"Reason: Supervisor {logged_out_supervisor.get_full_name()} has logged out and no backup supervisor is currently logged in.\n\n"
+            f"Action Required: Please manually assign a supervisor to this process immediately to avoid production delays."
+        )
+        
+        notification_count = 0
+        for recipient in recipients:
+            WorkflowNotification.objects.create(
+                notification_type='supervisor_reassignment',
+                title=f'🚨 Process Unassigned: {execution.process.name}',
+                message=notification_message,
+                recipient=recipient,
+                related_mo=execution.mo,
+                priority='high',
+                action_required=True,
+                created_by=None  # System-generated
+            )
+            notification_count += 1
+            
+        logger.info(
+            f"Sent unassigned process notification to {production_heads.count()} production heads "
+            f"and {managers.count()} managers (total: {notification_count} notifications)"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error sending notification to production heads/managers: {str(e)}")
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_user(request):
     """
-    Enhanced logout with session tracking
+    Enhanced logout with session tracking and supervisor work reassignment
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
         refresh_token = request.data.get('refresh')
+        
+        # Check if user has supervisor role
+        is_supervisor = request.user.user_roles.filter(
+            role__name='supervisor', 
+            is_active=True
+        ).exists()
+        
+        reassignment_summary = []
+        
+        # If supervisor is logging out, reassign their work
+        if is_supervisor:
+            try:
+                reassignment_summary = _reassign_supervisor_work(request.user)
+            except Exception as e:
+                logger.error(f"Error reassigning supervisor work during logout: {str(e)}", exc_info=True)
+                # Continue with logout even if reassignment fails
         
         # Update login session
         LoginSession.objects.filter(
@@ -156,9 +495,15 @@ def logout_user(request):
         if refresh_token:
             token = RefreshToken(refresh_token)
             token.blacklist()
-            
-        return Response({'message': 'Successfully logged out'}, status=status.HTTP_200_OK)
+        
+        response_data = {
+            'message': 'Successfully logged out',
+            'reassignment_summary': reassignment_summary if is_supervisor else None
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
     except Exception as e:
+        logger.error(f"Logout error: {str(e)}", exc_info=True)
         return Response({'error': 'Invalid token'}, status=status.HTTP_400_BAD_REQUEST)
 
 
