@@ -147,7 +147,7 @@ class BatchListSerializer(serializers.ModelSerializer):
     completion_percentage = serializers.ReadOnlyField()
     is_overdue = serializers.ReadOnlyField()
     remaining_quantity = serializers.ReadOnlyField()
-    
+
     class Meta:
         model = Batch
         fields = [
@@ -160,6 +160,25 @@ class BatchListSerializer(serializers.ModelSerializer):
             'is_overdue', 'created_at', 'updated_at'
         ]
         read_only_fields = ['batch_id', 'created_at', 'updated_at']
+
+
+class BatchMinimalSerializer(serializers.ModelSerializer):
+    """Highly optimized minimal serializer for batches in production-head MO detail page"""
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = Batch
+        # Highly optimized: Only include fields used in production-head MO detail page
+        # REMOVED UNUSED FIELDS: mo, mo_id, product_code, product_code_display, actual_quantity_started,
+        # scrap_rm_weight, progress_percentage, completion_percentage, remaining_quantity,
+        # assigned_operator, assigned_operator_name, assigned_supervisor, assigned_supervisor_name,
+        # planned_start_date, planned_end_date, actual_start_date, actual_end_date,
+        # is_overdue, created_at, updated_at
+        # NOTE: 'notes' is included to check for batch verification status
+        fields = [
+            'id', 'batch_id', 'planned_quantity', 'actual_quantity_completed',
+            'scrap_quantity', 'status', 'status_display', 'notes'
+        ]
 
 
 class ManufacturingOrderListSerializer(serializers.ModelSerializer):
@@ -710,7 +729,7 @@ class MOProcessAlertSerializer(serializers.ModelSerializer):
     severity_display = serializers.CharField(source='get_severity_display', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     resolved_by_name = serializers.CharField(source='resolved_by.get_full_name', read_only=True)
-    
+
     class Meta:
         model = MOProcessAlert
         fields = [
@@ -722,26 +741,38 @@ class MOProcessAlertSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
 
+class MOProcessAlertMinimalSerializer(serializers.ModelSerializer):
+    """Highly optimized minimal serializer for process alerts in production-head MO detail page"""
+    severity_display = serializers.CharField(source='get_severity_display', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = MOProcessAlert
+        # Highly optimized: Only include fields used in production-head MO detail page
+        # REMOVED UNUSED FIELDS: alert_type, alert_type_display, is_resolved, resolved_at,
+        # resolved_by, resolved_by_name, resolution_notes, created_by
+        fields = [
+            'id', 'severity', 'severity_display', 'title', 'description',
+            'created_at', 'created_by_name'
+        ]
+
+
 class MOProcessExecutionMinimalSerializer(serializers.ModelSerializer):
-    """Minimal serializer for process executions in process_tracking endpoint"""
+    """Highly optimized minimal serializer for process executions in production-head MO detail page"""
     process_name = serializers.CharField(source='process.name', read_only=True)
-    process_code = serializers.IntegerField(source='process.code', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    assigned_operator_name = serializers.SerializerMethodField()
     assigned_supervisor_name = serializers.SerializerMethodField()
     batch_counts = serializers.SerializerMethodField()
-    step_count = serializers.SerializerMethodField()
-    duration_minutes = serializers.ReadOnlyField()
-    is_overdue = serializers.ReadOnlyField()
-    
+
     class Meta:
         model = MOProcessExecution
+        # Highly optimized: Only include fields used in production-head MO detail page
+        # REMOVED UNUSED FIELDS: process, process_code, actual_start_time, actual_end_time,
+        # assigned_operator, assigned_operator_name, progress_percentage, duration_minutes,
+        # is_overdue, step_count, created_at, updated_at
         fields = [
-            'id', 'process', 'process_name', 'process_code', 'status', 'status_display',
-            'sequence_order', 'actual_start_time', 'actual_end_time',
-            'assigned_operator', 'assigned_operator_name', 'assigned_supervisor', 
-            'assigned_supervisor_name', 'progress_percentage', 'duration_minutes',
-            'is_overdue', 'step_count', 'batch_counts', 'created_at', 'updated_at'
+            'id', 'process_name', 'status', 'status_display', 'sequence_order',
+            'assigned_supervisor', 'assigned_supervisor_name', 'batch_counts'
         ]
         read_only_fields = ['created_at', 'updated_at']
     
@@ -760,29 +791,27 @@ class MOProcessExecutionMinimalSerializer(serializers.ModelSerializer):
 
 
 class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
-    """Optimized MO serializer for process tracking - only includes fields used in frontend"""
+    """Highly optimized MO serializer for production-head MO detail page - only essential fields"""
     product_code_display = serializers.CharField(source='product_code.product_code', read_only=True)
-    product_code_value = serializers.CharField(source='product_code.product_code', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     shift_display = serializers.CharField(source='get_shift_display', read_only=True)
     process_executions = MOProcessExecutionMinimalSerializer(many=True, read_only=True)
     overall_progress = serializers.SerializerMethodField()
-    active_process = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = ManufacturingOrder
-        # Optimized: Only include fields actually used in frontend process tracking pages
+        # Highly optimized: Only include fields used in production-head MO detail page
+        # REMOVED UNUSED FIELDS: date_time, product_code, product_code_value, product_type, material_type,
+        # wire_diameter_mm, thickness_mm, planned_start_date, planned_end_date, actual_start_date,
+        # actual_end_date, active_process (replaced with overall_progress), rejected_by, rejection_reason
         fields = [
-            'id', 'mo_id', 'date_time', 'product_code', 'product_code_display', 'product_code_value',
-            'quantity', 'product_type', 'material_name', 'material_type', 'grade',
-            'wire_diameter_mm', 'thickness_mm', 'shift', 'shift_display', 
-            'planned_start_date', 'planned_end_date', 'actual_start_date', 'actual_end_date', 
-            'status', 'status_display', 'priority', 'priority_display', 
-            'delivery_date', 'special_instructions', 'process_executions', 
-            'overall_progress', 'active_process', 'rejected_at', 'rejected_by', 'rejection_reason'
+            'id', 'mo_id', 'product_code_display', 'quantity', 'material_name', 'grade',
+            'shift', 'shift_display', 'status', 'status_display', 'priority', 'priority_display',
+            'delivery_date', 'special_instructions', 'process_executions',
+            'overall_progress', 'rejected_at'
         ]
-        read_only_fields = ['mo_id', 'date_time', 'created_at', 'updated_at']
+        read_only_fields = ['mo_id', 'created_at', 'updated_at']
     
     def get_overall_progress(self, obj):
         """Calculate overall progress across all processes"""
@@ -1412,11 +1441,11 @@ class RawMaterialAllocationSerializer(serializers.ModelSerializer):
     locked_by_name = serializers.CharField(source='locked_by.get_full_name', read_only=True)
     swapped_to_mo_id = serializers.CharField(source='swapped_to_mo.mo_id', read_only=True)
     history = RMAllocationHistorySerializer(many=True, read_only=True)
-    
+
     class Meta:
         model = RawMaterialAllocation
         fields = [
-            'id', 'mo', 'mo_id', 'mo_priority', 'mo_status', 
+            'id', 'mo', 'mo_id', 'mo_priority', 'mo_status',
             'raw_material', 'raw_material_code', 'raw_material_name', 'raw_material_details',
             'allocated_quantity_kg', 'status', 'can_be_swapped',
             'swapped_to_mo', 'swapped_to_mo_id', 'swapped_at', 'swapped_by', 'swap_reason',
@@ -1429,6 +1458,23 @@ class RawMaterialAllocationSerializer(serializers.ModelSerializer):
             'raw_material_details', 'status', 'swapped_at', 'swapped_by', 'locked_at', 'locked_by',
             'allocated_at', 'allocated_by', 'allocated_by_name', 'locked_by_name',
             'swapped_to_mo_id', 'history'
+        ]
+
+
+class RawMaterialAllocationMinimalSerializer(serializers.ModelSerializer):
+    """Highly optimized minimal serializer for RM allocations in production-head MO detail page"""
+    raw_material_name = serializers.CharField(source='raw_material.material_name', read_only=True)
+    allocated_by_name = serializers.CharField(source='allocated_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = RawMaterialAllocation
+        # Highly optimized: Only include fields used in production-head MO detail page
+        # REMOVED UNUSED FIELDS: mo, mo_id, mo_priority, mo_status, raw_material, raw_material_code,
+        # raw_material_details, can_be_swapped, swapped_to_mo, swapped_to_mo_id, swapped_at,
+        # swapped_by, swap_reason, locked_at, locked_by, locked_by_name, notes, history
+        fields = [
+            'raw_material_name', 'allocated_quantity_kg', 'status',
+            'allocated_at', 'allocated_by_name'
         ]
 
 

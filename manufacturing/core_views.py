@@ -28,10 +28,10 @@ from .serializers import (
     ProductBasicSerializer, RawMaterialBasicSerializer, VendorBasicSerializer,
     ManufacturingOrderWithProcessesSerializer, MOProcessExecutionListSerializer,
     MOProcessExecutionDetailSerializer, MOProcessStepExecutionSerializer,
-    MOProcessAlertSerializer, BatchListSerializer, BatchDetailSerializer,
+    MOProcessAlertSerializer, MOProcessAlertMinimalSerializer, BatchListSerializer, BatchDetailSerializer,
     OutsourcingRequestListSerializer, OutsourcingRequestDetailSerializer,
     OutsourcingRequestSendSerializer, OutsourcingRequestReturnSerializer,
-    RawMaterialAllocationSerializer, RMAllocationHistorySerializer,
+    RawMaterialAllocationSerializer, RawMaterialAllocationMinimalSerializer, RMAllocationHistorySerializer,
     RMAllocationSwapSerializer, RMAllocationCheckSerializer
 )
 from products.models import Product
@@ -1839,7 +1839,6 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
             user_roles = request.user.user_roles.filter(is_active=True).values_list('role__name', flat=True)
             if not any(role in ['production_head', 'manager', 'admin'] for role in user_roles):
                 return Response({
-                    'success': False,
                     'error': 'Only production head/manager can assign supervisors'
                 }, status=status.HTTP_403_FORBIDDEN)
             
@@ -1852,7 +1851,6 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
             
             if not supervisor_id:
                 return Response({
-                    'success': False,
                     'error': 'Supervisor ID is required'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
@@ -1860,12 +1858,8 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                 supervisor = User.objects.get(id=supervisor_id)
             except User.DoesNotExist:
                 return Response({
-                    'success': False,
                     'error': 'Supervisor user not found'
                 }, status=status.HTTP_404_NOT_FOUND)
-            
-            # Store old supervisor for logging
-            old_supervisor = process_execution.assigned_supervisor
             
             # Update supervisor assignment
             process_execution.assigned_supervisor = supervisor
@@ -1888,23 +1882,14 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                 created_by=request.user
             )
             
-            # Serialize and return updated process execution
-            serializer = MOProcessExecutionDetailSerializer(process_execution)
-            
+            # Return simple response with just supervisor ID
             return Response({
-                'success': True,
-                'message': f'Supervisor assigned successfully',
-                'old_supervisor': old_supervisor.get_full_name() if old_supervisor else 'None',
-                'new_supervisor': supervisor.get_full_name(),
-                'process_execution': serializer.data
+                'assigned_supervisor': supervisor_id
             }, status=status.HTTP_200_OK)
             
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f'Error assigning supervisor: {str(e)}', exc_info=True)
             return Response({
-                'success': False,
                 'error': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -2339,13 +2324,15 @@ class MOProcessAlertViewSet(viewsets.ModelViewSet):
     def active_alerts(self, request):
         """Get active (unresolved) alerts"""
         alerts = self.get_queryset().filter(is_resolved=False)
-        
+
         # Filter by MO if specified
         mo_id = request.query_params.get('mo_id')
         if mo_id:
             alerts = alerts.filter(process_execution__mo_id=mo_id)
-        
-        serializer = self.get_serializer(alerts, many=True)
+
+        # Use minimal serializer for production-head MO detail page to reduce payload
+        from .serializers import MOProcessAlertMinimalSerializer
+        serializer = MOProcessAlertMinimalSerializer(alerts, many=True)
         return Response(serializer.data)
 
 
@@ -2619,7 +2606,9 @@ class BatchViewSet(viewsets.ModelViewSet):
             )
         
         batches = self.get_queryset().filter(mo_id=mo_id)
-        serializer = self.get_serializer(batches, many=True)
+        # Use minimal serializer for production-head MO detail page to reduce payload
+        from .serializers import BatchMinimalSerializer
+        serializer = BatchMinimalSerializer(batches, many=True)
         
         # Calculate summary
         total_planned = sum(b.planned_quantity for b in batches)
@@ -2636,6 +2625,49 @@ class BatchViewSet(viewsets.ModelViewSet):
         })
 
     @action(detail=True, methods=['post'])
+    def verify_batch(self, request, pk=None):
+        """Verify a batch before starting - Supervisor only"""
+        batch = self.get_object()
+        
+        # Check if user is supervisor
+        if not request.user.user_roles.filter(role__name='supervisor').exists():
+            return Response(
+                {'error': 'Only supervisors can verify batches'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check if batch is in created status (pending verification)
+        if batch.status != 'created':
+            return Response(
+                {'error': f'Batch can only be verified when in created status. Current status: {batch.status}'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Mark batch as verified by adding verification note
+        verification_note = f"\n[BATCH_VERIFIED] Verified by {request.user.get_full_name()} on {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        batch.notes = (batch.notes or '') + verification_note
+        batch.save(update_fields=['notes', 'updated_at'])
+        
+        # Log the verification
+        from manufacturing.models.activity_log import ProcessActivityLog
+        first_process_execution = batch.mo.process_executions.first()
+        ProcessActivityLog.objects.create(
+            batch=batch,
+            mo=batch.mo,
+            process=first_process_execution.process if first_process_execution else None,
+            process_execution=first_process_execution,
+            activity_type='batch_verified',
+            performed_by=request.user,
+            remarks=f'Batch {batch.batch_id} verified by supervisor before starting'
+        )
+        
+        serializer = self.get_serializer(batch)
+        return Response({
+            'message': f'Batch {batch.batch_id} verified successfully',
+            'batch': serializer.data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
     def start_batch(self, request, pk=None):
         """Start a batch - updates status to in_process and locks RM allocations"""
         batch = self.get_object()
@@ -2643,6 +2675,13 @@ class BatchViewSet(viewsets.ModelViewSet):
         if batch.status != 'created':
             return Response(
                 {'error': 'Batch can only be started from created status'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if batch is verified (has verification note)
+        if not batch.notes or '[BATCH_VERIFIED]' not in batch.notes:
+            return Response(
+                {'error': 'Batch must be verified by supervisor before starting'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -3667,7 +3706,9 @@ class RawMaterialAllocationViewSet(viewsets.ReadOnlyModelViewSet):
         
         # Get all allocations for this MO (including reserved, locked, swapped, released)
         allocations = self.queryset.filter(mo=mo)
-        serializer = self.get_serializer(allocations, many=True)
+        # Use minimal serializer for production-head MO detail page to reduce payload
+        from .serializers import RawMaterialAllocationMinimalSerializer
+        serializer = RawMaterialAllocationMinimalSerializer(allocations, many=True)
         
         # DEBUG: Log allocation details
         logger.info(f"[DEBUG] by_mo API - MO {mo.mo_id} - Total allocations: {allocations.count()}")
