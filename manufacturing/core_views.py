@@ -2109,24 +2109,12 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if all steps are completed
-        incomplete_steps = execution.step_executions.exclude(status='completed').count()
-        if incomplete_steps > 0:
-            incomplete_step_names = list(execution.step_executions.exclude(status='completed').values_list('process_step__step_name', flat=True))
-            return Response(
-                {
-                    'error': f'{incomplete_steps} steps are still incomplete',
-                    'message': f'{incomplete_steps} steps are still incomplete: {", ".join(incomplete_step_names)}',
-                    'incomplete_steps': incomplete_step_names
-                }, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         # For batch-based production, check if all batches have completed this process
         mo = execution.mo
         mo_batches = mo.batches.exclude(status='cancelled')
         
         if mo_batches.exists():
+            # For batch-based production, batch completion is what matters, not step completion
             # Check if all batches have completed this process
             all_batches_completed_process = True
             for batch in mo_batches:
@@ -2140,6 +2128,19 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                     {
                         'error': 'Cannot complete process - not all batches have completed this process',
                         'message': 'All batches must complete this process before marking the process as completed'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # For non-batch production (step-based), check if all steps are completed
+            incomplete_steps = execution.step_executions.exclude(status='completed').count()
+            if incomplete_steps > 0:
+                incomplete_step_names = list(execution.step_executions.exclude(status='completed').values_list('process_step__step_name', flat=True))
+                return Response(
+                    {
+                        'error': f'{incomplete_steps} steps are still incomplete',
+                        'message': f'{incomplete_steps} steps are still incomplete: {", ".join(incomplete_step_names)}',
+                        'incomplete_steps': incomplete_step_names
                     }, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
