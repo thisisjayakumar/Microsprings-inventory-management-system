@@ -558,13 +558,16 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
     created_by = UserBasicSerializer(read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
+    cancelled_by_role = serializers.CharField(source='get_cancelled_by_role', read_only=True)
+    cancellation_display = serializers.CharField(source='get_cancellation_display', read_only=True)
     
     class Meta:
         model = PurchaseOrder
         fields = [
             'id', 'po_id', 'date_time', 'rm_code', 'vendor_name', 'quantity_ordered', 'quantity_received',
             'unit_price', 'total_amount', 'status', 'status_display', 'material_type',
-            'material_type_display', 'expected_date', 'created_by', 'created_at'
+            'material_type_display', 'expected_date', 'created_by', 'created_at',
+            'cancelled_at', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason'
         ]
         read_only_fields = ['po_id', 'date_time', 'total_amount']
 
@@ -864,6 +867,8 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
     # Display fields
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
+    cancelled_by_role = serializers.CharField(source='get_cancelled_by_role', read_only=True)
+    cancellation_display = serializers.CharField(source='get_cancellation_display', read_only=True)
     
     # Write-only fields for creation
     rm_code_id = serializers.IntegerField(write_only=True)
@@ -879,7 +884,7 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
             'vendor_address_auto', 'gst_no_auto', 'mob_no_auto', 'expected_date',
             'quantity_ordered', 'quantity_received', 'unit_price', 'total_amount', 'status', 'status_display',
             'submitted_at', 'approved_at', 'approved_by', 'cancelled_at',
-            'cancelled_by', 'cancellation_reason',
+            'cancelled_by', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason',
             'terms_conditions', 'notes', 'created_at', 'created_by', 'updated_at',
             'status_history', 'transaction_history'
         ]

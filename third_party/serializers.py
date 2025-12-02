@@ -44,6 +44,16 @@ class VendorSerializer(serializers.ModelSerializer):
         return value
 
 
+class VendorListSerializer(serializers.ModelSerializer):
+    """Simplified serializer for vendor list GET requests"""
+    
+    class Meta:
+        model = Vendor
+        fields = [
+            'id', 'name', 'vendor_type', 'gst_no', 'contact_no', 'contact_person'
+        ]
+
+
 class CustomerSerializer(serializers.ModelSerializer):
     """Serializer for Customer model"""
     industry_type_display = serializers.CharField(source='get_industry_type_display', read_only=True)

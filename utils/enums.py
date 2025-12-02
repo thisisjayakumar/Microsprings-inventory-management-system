@@ -151,7 +151,7 @@ class PriorityChoices(models.TextChoices):
 class POStatusChoices(models.TextChoices):
     PO_INITIATED = 'po_initiated', _('Purchase Order Initiated')
     PO_APPROVED = 'po_approved', _('Approved by GM')
-    PO_CANCELLED = 'po_cancelled', _('Cancelled by Manager')
+    PO_CANCELLED = 'po_cancelled', _('Cancelled')
     RM_PENDING = 'rm_pending', _('Awaiting RM Store Manager Action')
     RM_COMPLETED = 'rm_completed', _('Goods Receipt Completed')
 

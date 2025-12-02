@@ -139,6 +139,37 @@ class PurchaseOrder(models.Model):
 
     def __str__(self):
         return f"{self.po_id} - {self.vendor_name.name} (Qty: {self.quantity_ordered})"
+    
+    def get_cancelled_by_role(self):
+        """Get the role of the user who cancelled this PO"""
+        if not self.cancelled_by:
+            return None
+        
+        # Get the primary role of the user who cancelled
+        active_role = self.cancelled_by.user_roles.filter(is_active=True).select_related('role').first()
+        if active_role:
+            return active_role.role.name
+        return None
+    
+    def get_cancellation_display(self):
+        """Get human-readable cancellation info"""
+        if not self.cancelled_by:
+            return None
+        
+        role = self.get_cancelled_by_role()
+        if role:
+            # Map role names to display text
+            role_display_map = {
+                'manager': 'Manager',
+                'production_head': 'Production Head',
+                'admin': 'Admin',
+                'gm': 'General Manager',
+            }
+            role_display = role_display_map.get(role, role.replace('_', ' ').title())
+            return f"Cancelled by {role_display}"
+        
+        # Fallback to user name if role not found
+        return f"Cancelled by {self.cancelled_by.get_full_name() or self.cancelled_by.email}"
 
 
 class POStatusHistory(models.Model):

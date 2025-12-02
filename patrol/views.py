@@ -148,7 +148,7 @@ class PatrolDutyViewSet(viewsets.ModelViewSet):
         
         processes = WorkCenterMaster.objects.filter(
             is_active=True
-        ).values_list('work_center_name', flat=True).distinct()
+        ).select_related('work_center').values_list('work_center__name', flat=True).distinct()
         
         return Response({'processes': list(processes)})
 

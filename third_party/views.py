@@ -11,7 +11,7 @@ from django.db.models import Q
 
 from .models import Vendor, Brand, Customer
 from .serializers import (
-    VendorSerializer, BrandSerializer, CustomerSerializer,
+    VendorSerializer, VendorListSerializer, BrandSerializer, CustomerSerializer,
     CustomerListSerializer, CustomerCreateUpdateSerializer
 )
 
@@ -40,13 +40,18 @@ class BrandDetailView(generics.RetrieveUpdateDestroyAPIView):
 class VendorListCreateView(generics.ListCreateAPIView):
     """List all vendors or create a new vendor"""
     queryset = Vendor.objects.all()
-    serializer_class = VendorSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['vendor_type', 'service_type', 'is_active', 'brands']
     search_fields = ['name', 'products_process', 'service_type', 'brands__name', 'gst_no', 'contact_person']
     ordering_fields = ['name', 'vendor_type', 'created_at']
     ordering = ['name']
+
+    def get_serializer_class(self):
+        """Use different serializers for list and create operations"""
+        if self.request.method == 'GET':
+            return VendorListSerializer
+        return VendorSerializer
 
 
 class VendorDetailView(generics.RetrieveUpdateDestroyAPIView):
