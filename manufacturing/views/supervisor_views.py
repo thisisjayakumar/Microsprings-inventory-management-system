@@ -469,6 +469,20 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                 # Log rework creation
                 ProcessActivityLog.log_rework_created(rework_batch, request.user)
             
+            # Update batch-process execution state in batch.notes
+            # This marks the process as completed for this batch
+            batch_process_key = f"PROCESS_{process_execution.id}_STATUS"
+            current_notes = batch.notes or ""
+            
+            # Remove any existing status for this process
+            import re
+            pattern = f"{batch_process_key}:[^;]*;"
+            current_notes = re.sub(pattern, "", current_notes)
+            
+            # Add completed status
+            new_status = f"{batch_process_key}:completed;"
+            batch.notes = current_notes + new_status
+            
             # Move OK quantity to next process
             if completion.ok_quantity_kg > 0:
                 self._move_to_next_process(batch, process_execution, completion.ok_quantity_kg)
@@ -476,7 +490,35 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             # Add scrap to count (update batch scrap quantity)
             if completion.scrap_quantity_kg > 0:
                 batch.scrap_quantity += int(completion.scrap_quantity_kg)
-                batch.save()
+            
+            # Save batch with updated notes and scrap quantity
+            batch.save()
+            
+            # Update process execution progress based on batch completion
+            # This calculates progress_percentage for the process execution
+            mo = batch.mo
+            mo_batches = mo.batches.exclude(status='cancelled')
+            
+            if mo_batches.exists():
+                # Count batches that have completed this process
+                completed_batches = 0
+                total_batches = mo_batches.count()
+                
+                for mo_batch in mo_batches:
+                    if f"{batch_process_key}:completed;" in (mo_batch.notes or ""):
+                        completed_batches += 1
+                
+                # Calculate and update progress percentage
+                if total_batches > 0:
+                    progress_percentage = (completed_batches / total_batches) * 100
+                    process_execution.progress_percentage = progress_percentage
+                    
+                    # If process was marked as completed but not all batches are done, revert to in_progress
+                    if process_execution.status == 'completed' and completed_batches < total_batches:
+                        process_execution.status = 'in_progress'
+                        process_execution.actual_end_time = None
+                    
+                    process_execution.save()
         
         return Response(
             BatchProcessCompletionSerializer(completion).data,
