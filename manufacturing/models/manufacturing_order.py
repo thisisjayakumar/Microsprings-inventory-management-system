@@ -110,6 +110,19 @@ class ManufacturingOrder(models.Model):
         help_text="Status of RM allocation/release for this MO"
     )
     
+    # RM Pending from PO tracking
+    rm_pending_from_po = models.BooleanField(
+        default=False,
+        help_text="True if RM is still pending from a Purchase Order"
+    )
+    pending_po_quantity_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        help_text="Quantity of RM pending from PO (in kg)"
+    )
+    
     # Assignment
     shift = models.CharField(max_length=10, choices=ShiftChoices.choices, null=True, blank=True)
     

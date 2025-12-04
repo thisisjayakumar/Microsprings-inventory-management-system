@@ -391,6 +391,23 @@ class MOProcessExecution(models.Model):
                         'next_process_execution_id': next_process.id
                     }
         
+        # Check if RM is still pending from PO - prevent completion
+        if self.mo.rm_pending_from_po:
+            return {
+                'moved_to_packing': False,
+                'error': 'Cannot complete MO - Raw Material is still pending from Purchase Order',
+                'rm_pending': True,
+                'pending_po_quantity_kg': float(self.mo.pending_po_quantity_kg) if self.mo.pending_po_quantity_kg else None,
+                'related_pos': [
+                    {
+                        'po_id': po.po_id,
+                        'status': po.status,
+                        'status_display': po.get_status_display()
+                    }
+                    for po in self.mo.related_purchase_orders.all()
+                ]
+            }
+        
         packing_users = User.objects.filter(
             user_roles__role__name__in=['packing', 'fg_store'],
             user_roles__is_active=True

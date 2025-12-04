@@ -130,6 +130,19 @@ class ManufacturingOrder(models.Model):
         help_text="Status of RM allocation/release for this MO"
     )
     
+    # RM Pending from PO tracking
+    rm_pending_from_po = models.BooleanField(
+        default=False,
+        help_text="True if RM is still pending from a Purchase Order"
+    )
+    pending_po_quantity_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        help_text="Quantity of RM pending from PO (in kg)"
+    )
+    
     # Assignment (optional - assigned later in workflow)
     # NOTE: assigned_rm_store removed - all RM store users see all MOs
     # NOTE: Supervisor is no longer assigned at MO level
@@ -590,6 +603,16 @@ class PurchaseOrder(models.Model):
     )
     cancellation_reason = models.TextField(blank=True, help_text="Reason for cancellation")
     
+    # Relationship to Manufacturing Order (when PO is created for a specific MO)
+    related_mo = models.ForeignKey(
+        'ManufacturingOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='related_purchase_orders',
+        help_text="Manufacturing Order this PO is created for (when stock is insufficient)"
+    )
+    
     # Additional details
     terms_conditions = models.TextField(blank=True)
     notes = models.TextField(blank=True)
@@ -966,6 +989,23 @@ class MOProcessExecution(models.Model):
                         'next_supervisor': next_supervisor.full_name,
                         'next_process_execution_id': next_process.id
                     }
+        
+        # Check if RM is still pending from PO - prevent completion
+        if self.mo.rm_pending_from_po:
+            return {
+                'moved_to_packing': False,
+                'error': 'Cannot complete MO - Raw Material is still pending from Purchase Order',
+                'rm_pending': True,
+                'pending_po_quantity_kg': float(self.mo.pending_po_quantity_kg) if self.mo.pending_po_quantity_kg else None,
+                'related_pos': [
+                    {
+                        'po_id': po.po_id,
+                        'status': po.status,
+                        'status_display': po.get_status_display()
+                    }
+                    for po in self.mo.related_purchase_orders.all()
+                ]
+            }
         
         # No next process - move to packing zone (mandatory step before FG store)
         packing_users = User.objects.filter(

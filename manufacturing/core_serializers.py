@@ -284,6 +284,7 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
     status_history = MOStatusHistorySerializer(many=True, read_only=True)
     transaction_history = MOTransactionHistorySerializer(many=True, read_only=True)
     rm_returns = serializers.SerializerMethodField()
+    related_purchase_orders = serializers.SerializerMethodField()
     
     # Customer fields
     from third_party.serializers import CustomerListSerializer
@@ -325,12 +326,14 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
             'thickness_mm', 'finishing', 'manufacturer_brand', 'weight_kg',
             'loose_fg_stock', 'rm_required_kg', 'tolerance_percentage', 'scrap_percentage', 
             'rm_released_kg', 'strips_required', 'total_pieces_from_strips', 'excess_pieces',
-            'shift', 'shift_display', 'planned_start_date', 'planned_end_date',
+            'rm_pending_from_po', 'pending_po_quantity_kg', 'shift', 'shift_display', 
+            'planned_start_date', 'planned_end_date',
             'actual_start_date', 'actual_end_date', 'status', 'status_display',
             'priority', 'priority_display', 'customer', 'customer_id', 'customer_name', 
             'delivery_date', 'special_instructions', 'submitted_at', 'gm_approved_at', 
             'gm_approved_by', 'rm_allocated_at', 'rm_allocated_by', 'created_at', 
-            'created_by', 'updated_at', 'status_history', 'transaction_history', 'rm_returns'
+            'created_by', 'updated_at', 'status_history', 'transaction_history', 'rm_returns',
+            'related_purchase_orders'
         ]
         read_only_fields = [
             'mo_id', 'date_time', 'product_type', 'material_name', 'material_type',
@@ -549,6 +552,23 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
         ).order_by('-returned_at')
         
         return RMReturnSerializer(rm_returns, many=True).data
+    
+    def get_related_purchase_orders(self, obj):
+        """Get all related purchase orders for this MO"""
+        related_pos = obj.related_purchase_orders.all()
+        return [
+            {
+                'id': po.id,
+                'po_id': po.po_id,
+                'status': po.status,
+                'status_display': po.get_status_display(),
+                'quantity_ordered': float(po.quantity_ordered),
+                'quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                'expected_date': po.expected_date.isoformat() if po.expected_date else None,
+                'created_at': po.created_at.isoformat() if po.created_at else None,
+            }
+            for po in related_pos
+        ]
 
 
 class PurchaseOrderListSerializer(serializers.ModelSerializer):
@@ -873,6 +893,10 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
     # Write-only fields for creation
     rm_code_id = serializers.IntegerField(write_only=True)
     vendor_name_id = serializers.IntegerField(write_only=True)
+    related_mo_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    
+    # Related MO display field
+    related_mo_id_display = serializers.CharField(source='related_mo.mo_id', read_only=True)
     
     class Meta:
         model = PurchaseOrder
@@ -885,7 +909,8 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
             'quantity_ordered', 'quantity_received', 'unit_price', 'total_amount', 'status', 'status_display',
             'submitted_at', 'approved_at', 'approved_by', 'cancelled_at',
             'cancelled_by', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason',
-            'terms_conditions', 'notes', 'created_at', 'created_by', 'updated_at',
+            'terms_conditions', 'notes', 'related_mo', 'related_mo_id', 'related_mo_id_display',
+            'created_at', 'created_by', 'updated_at',
             'status_history', 'transaction_history'
         ]
         read_only_fields = [
@@ -900,12 +925,22 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
         """Create PO with auto-population of material and vendor details"""
         rm_code_id = validated_data.pop('rm_code_id')
         vendor_name_id = validated_data.pop('vendor_name_id')
+        related_mo_id = validated_data.pop('related_mo_id', None)
         
         try:
             rm_code = RawMaterial.objects.get(id=rm_code_id)
             vendor = Vendor.objects.get(id=vendor_name_id)
         except (RawMaterial.DoesNotExist, Vendor.DoesNotExist) as e:
             raise serializers.ValidationError(f"Invalid reference: {str(e)}")
+        
+        # Handle related MO if provided
+        related_mo = None
+        if related_mo_id:
+            try:
+                from manufacturing.models import ManufacturingOrder
+                related_mo = ManufacturingOrder.objects.get(id=related_mo_id)
+            except ManufacturingOrder.DoesNotExist:
+                raise serializers.ValidationError(f"Invalid Manufacturing Order ID: {related_mo_id}")
         
         # Auto-populate material details
         validated_data.update({
@@ -925,7 +960,8 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
             'vendor_address_auto': getattr(vendor, 'address', ''),
             'gst_no_auto': getattr(vendor, 'gst_no', ''),
             'mob_no_auto': getattr(vendor, 'contact_no', ''),
-            'created_by': self.context['request'].user
+            'created_by': self.context['request'].user,
+            'related_mo': related_mo
         })
         
         # Create the PO instance

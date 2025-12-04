@@ -1720,6 +1720,33 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             po.cancelled_at = timezone.now()
             po.cancelled_by = request.user
             po.cancellation_reason = rejection_reason
+        elif new_status == 'rm_completed':
+            # When PO is completed, update related MO to clear RM pending status
+            if po.related_mo:
+                mo = po.related_mo
+                mo.rm_pending_from_po = False
+                mo.pending_po_quantity_kg = None
+                mo.save()
+                
+                # Create transaction history for MO
+                try:
+                    from manufacturing.core_models import MOTransactionHistory
+                    from inventory.utils import generate_transaction_id
+                    transaction_id = generate_transaction_id('MO_RM_PO_COMPLETED')
+                    MOTransactionHistory.objects.create(
+                        mo=mo,
+                        transaction_type='rm_po_completed',
+                        transaction_id=transaction_id,
+                        description=f'RM from PO {po.po_id} is now available for MO {mo.mo_id}',
+                        details={
+                            'po_id': po.po_id,
+                            'po_quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                            'mo_id': mo.mo_id,
+                        },
+                        created_by=request.user
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create MO transaction history for PO completion: {str(e)}")
         
         po.save()
         

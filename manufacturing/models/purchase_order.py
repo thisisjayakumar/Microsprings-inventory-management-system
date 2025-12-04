@@ -78,6 +78,16 @@ class PurchaseOrder(models.Model):
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_po_orders')
     cancellation_reason = models.TextField(blank=True, help_text="Reason for cancellation")
     
+    # Relationship to Manufacturing Order (when PO is created for a specific MO)
+    related_mo = models.ForeignKey(
+        'manufacturing.ManufacturingOrder',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='related_purchase_orders',
+        help_text="Manufacturing Order this PO is created for (when stock is insufficient)"
+    )
+    
     # Additional details
     terms_conditions = models.TextField(blank=True)
     notes = models.TextField(blank=True)
