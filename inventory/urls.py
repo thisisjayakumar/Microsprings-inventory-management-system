@@ -33,6 +33,10 @@ urlpatterns = [
     path('coiling/report/', views.report_handover_issue, name='report_handover_issue'),
     path('coiling/issues/', views.handover_issues_list, name='handover_issues_list'),
     
+    # Material Heat Numbers and Coils APIs
+    path('materials/heat-numbers-coils/', views.get_material_heat_numbers_coils, name='get_material_heat_numbers_coils'),
+    path('materials/delete-coils/', views.delete_coils_by_heat_numbers, name='delete_coils_by_heat_numbers'),
+    
     # Include router URLs
     path('', include(router.urls)),
 ]

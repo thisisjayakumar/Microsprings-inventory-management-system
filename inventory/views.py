@@ -7,6 +7,7 @@ from django.db.models import Q, Prefetch, Sum
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from decimal import Decimal
 
 from products.models import Product
 from .models import (
@@ -22,7 +23,9 @@ from .serializers import (
     GRMReceiptListSerializer, HeatNumberSerializer, RMStockBalanceHeatSerializer,
     InventoryTransactionHeatSerializer, HeatNumberHandoverSerializer,
     HandoverIssueSerializer, HandoverIssueCreateSerializer, HandoverVerifySerializer,
-    RMReturnSerializer, RMReturnCreateSerializer, RMReturnDispositionSerializer
+    RMReturnSerializer, RMReturnCreateSerializer, RMReturnDispositionSerializer,
+    MaterialHeatNumbersResponseSerializer, DeleteCoilsRequestSerializer,
+    DeleteCoilsResponseSerializer
 )
 from .transaction_manager import InventoryTransactionManager
 from authentication.models import UserRole, Role
@@ -911,3 +914,177 @@ class RMReturnViewSet(viewsets.ModelViewSet):
             'data': serializer.data,
             'count': returns.count()
         }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_material_heat_numbers_coils(request):
+    """
+    Get all heat numbers and coils for a given material code
+    
+    Query Parameters:
+    - material_code (required): The material code to query
+    
+    Returns:
+    - material_code: The material code
+    - material_name: The material name
+    - heat_numbers: List of heat numbers with their coils
+        - id: Heat number ID
+        - heat_number: Heat number string
+        - grm_number: GRM receipt number
+        - total_weight_kg: Total weight in kg
+        - coils_received: Number of coils received
+        - available_quantity_kg: Available quantity in kg
+        - coils: List of coils with number and weight
+    """
+    material_code = request.query_params.get('material_code')
+    
+    if not material_code:
+        return Response({
+            'error': 'material_code query parameter is required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        raw_material = RawMaterial.objects.get(material_code=material_code)
+    except RawMaterial.DoesNotExist:
+        return Response({
+            'error': f'Material code "{material_code}" does not exist'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Get all heat numbers for this material
+    heat_numbers = HeatNumber.objects.filter(
+        raw_material=raw_material,
+        is_available=True
+    ).select_related('grm_receipt').order_by('-created_at')
+    
+    # Serialize the response
+    serializer = MaterialHeatNumbersResponseSerializer({
+        'material_code': raw_material.material_code,
+        'material_name': raw_material.material_name,
+        'heat_numbers': heat_numbers
+    })
+    
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsRMStoreUser])
+def delete_coils_by_heat_numbers(request):
+    """
+    Delete all coils from specified heat numbers for a material code
+    
+    Request Body:
+    {
+        "material_code": "MAT-001",
+        "heat_numbers": ["HEAT-001", "HEAT-002"]
+    }
+    
+    This will:
+    1. Find all heat numbers matching the material_code and heat_numbers list
+    2. Delete all coils (clear the items JSONField) from those heat numbers
+    3. Update coils_received to 0
+    4. Update total_weight_kg to 0
+    5. Update RM stock balance
+    6. Mark heat numbers as unavailable (is_available=False)
+    
+    Returns:
+    - message: Success message
+    - material_code: The material code
+    - deleted_heat_numbers: List of heat numbers that had coils deleted
+    - deleted_coils_count: Total number of coils deleted
+    - updated_heat_numbers: List of heat numbers that were updated
+    """
+    serializer = DeleteCoilsRequestSerializer(data=request.data)
+    
+    if not serializer.is_valid():
+        return Response({
+            'error': 'Invalid request data',
+            'details': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    material_code = serializer.validated_data['material_code']
+    heat_number_list = serializer.validated_data['heat_numbers']
+    
+    try:
+        raw_material = RawMaterial.objects.get(material_code=material_code)
+    except RawMaterial.DoesNotExist:
+        return Response({
+            'error': f'Material code "{material_code}" does not exist'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Find heat numbers matching the criteria
+    heat_numbers = HeatNumber.objects.filter(
+        raw_material=raw_material,
+        heat_number__in=heat_number_list,
+        is_available=True
+    )
+    
+    if not heat_numbers.exists():
+        return Response({
+            'error': f'No active heat numbers found for material "{material_code}" with the provided heat numbers'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    deleted_heat_numbers = []
+    deleted_coils_count = 0
+    updated_heat_numbers = []
+    
+    with transaction.atomic():
+        for heat in heat_numbers:
+            # Count coils before deletion
+            coils_before = len(heat.items) if heat.items else 0
+            deleted_coils_count += coils_before
+            
+            # Clear coils (items JSONField)
+            heat.items = []
+            heat.coils_received = 0
+            heat.total_weight_kg = Decimal('0')
+            heat.is_available = False
+            heat.save()
+            
+            deleted_heat_numbers.append(heat.heat_number)
+            updated_heat_numbers.append(heat.heat_number)
+        
+        # Update stock balance for the raw material (both RMStockBalanceHeat and RMStockBalance)
+        try:
+            stock_balance_heat = RMStockBalanceHeat.objects.get(raw_material=raw_material)
+            stock_balance_heat.update_from_heat_numbers()
+        except RMStockBalanceHeat.DoesNotExist:
+            # If stock balance doesn't exist, create it
+            RMStockBalanceHeat.objects.create(raw_material=raw_material)
+        
+        # Also update the simple RMStockBalance if it exists
+        try:
+            stock_balance = RMStockBalance.objects.get(raw_material=raw_material)
+            # Calculate total available quantity from heat numbers
+            total_available = sum(
+                heat.get_available_quantity_kg() 
+                for heat in HeatNumber.objects.filter(
+                    raw_material=raw_material,
+                    is_available=True
+                )
+            )
+            stock_balance.available_quantity = total_available
+            stock_balance.save()
+        except RMStockBalance.DoesNotExist:
+            # Create RMStockBalance if it doesn't exist
+            total_available = sum(
+                heat.get_available_quantity_kg() 
+                for heat in HeatNumber.objects.filter(
+                    raw_material=raw_material,
+                    is_available=True
+                )
+            )
+            RMStockBalance.objects.create(
+                raw_material=raw_material,
+                available_quantity=total_available
+            )
+    
+    response_serializer = DeleteCoilsResponseSerializer({
+        'message': f'Successfully deleted {deleted_coils_count} coils from {len(deleted_heat_numbers)} heat number(s)',
+        'material_code': material_code,
+        'deleted_heat_numbers': deleted_heat_numbers,
+        'deleted_coils_count': deleted_coils_count,
+        'updated_heat_numbers': updated_heat_numbers
+    })
+    
+    return Response(response_serializer.data, status=status.HTTP_200_OK)
