@@ -505,6 +505,9 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
     
     def create(self, validated_data):
         """Create GRM receipt with heat numbers"""
+        from decimal import Decimal
+        from inventory.models import RMStockBalance
+        
         heat_numbers_data = validated_data.pop('heat_numbers_data', [])
         quantity_received = validated_data.pop('quantity_received', None)
         
@@ -519,10 +522,26 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
             grm_receipt.purchase_order.quantity_received = quantity_received
             grm_receipt.purchase_order.save()
         
-        # Create heat numbers
+        # Create heat numbers and update stock balances
         for i, heat_data in enumerate(heat_numbers_data):
             try:
-                HeatNumber.objects.create(grm_receipt=grm_receipt, **heat_data)
+                heat_number = HeatNumber.objects.create(grm_receipt=grm_receipt, **heat_data)
+                
+                # Update RMStockBalance available_quantity for this raw material
+                raw_material = heat_data.get('raw_material')
+                total_weight = heat_data.get('total_weight_kg', 0)
+                
+                if raw_material and total_weight:
+                    stock_balance, created = RMStockBalance.objects.get_or_create(
+                        raw_material=raw_material,
+                        defaults={'available_quantity': Decimal('0')}
+                    )
+                    # Add the weight to available quantity
+                    stock_balance.available_quantity += Decimal(str(total_weight))
+                    stock_balance.save()
+                    
+                # Update heat-tracked stock balance
+                heat_number.update_stock_balance()
             except Exception as e:
                 raise e
         
