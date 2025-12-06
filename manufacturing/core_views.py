@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Prefetch, Sum
+from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 import logging
@@ -826,7 +827,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             return self._handle_update_details(mo, request)
     
     def _handle_approve_mo(self, mo, request):
-        """Handle MO approval by manager (on_hold → mo_approved) - ONLY STATUS CHANGE, NO RM OPERATIONS"""
+        """Handle MO approval by manager (on_hold → mo_approved) - Reserve RM and reduce stock balance"""
         # Check if user is manager or production_head
         user_roles = request.user.user_roles.values_list('role__name', flat=True)
         if not any(role in ['manager', 'production_head'] for role in user_roles):
@@ -842,13 +843,69 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Update status ONLY - NO RM operations
+        # Update status
         old_status = mo.status
         mo.status = 'mo_approved'
         mo.gm_approved_at = timezone.now()
         mo.gm_approved_by = request.user
-        mo.save()
-        logger.info(f"[DEBUG] MO {mo.mo_id} approved. Status: {old_status} → mo_approved. RM will be reserved when production starts.")
+        
+        # Reserve RM and reduce stock balance when MO is approved
+        with transaction.atomic():
+            mo.save()
+            
+            # Reserve RM for this MO
+            try:
+                from manufacturing.services.rm_allocation import RMAllocationService
+                from manufacturing.models import RawMaterialAllocation
+                from inventory.models import RMStockBalance
+                
+                # Check if RM allocations already exist
+                existing_allocations = RawMaterialAllocation.objects.filter(mo=mo, status__in=['reserved', 'locked'])
+                
+                if not existing_allocations.exists() and mo.rm_required_kg and mo.rm_required_kg > 0:
+                    logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Approving MO. Reserving RM...")
+                    
+                    # Check if RM is pending from PO
+                    if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                        # Only reserve available portion (excluding pending PO quantity)
+                        available_rm_kg = mo.rm_required_kg - mo.pending_po_quantity_kg
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM pending from PO. Reserving available portion: {available_rm_kg}kg (Total required: {mo.rm_required_kg}kg, Pending from PO: {mo.pending_po_quantity_kg}kg)")
+                    else:
+                        # Reserve full required quantity
+                        available_rm_kg = mo.rm_required_kg
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No pending PO. Reserving full required quantity: {available_rm_kg}kg")
+                    
+                    # Reserve RM if quantity is positive
+                    if available_rm_kg > 0:
+                        reservation_result = RMAllocationService.allocate_rm_for_mo(mo, request.user)
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM allocated as RESERVED: {len(reservation_result) if reservation_result else 0}")
+                        
+                        if reservation_result:
+                            # Decrement RMStockBalance available_quantity for reserved qty
+                            raw_material = mo.product_code.material
+                            if raw_material:
+                                total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                                stock_balance, _ = RMStockBalance.objects.get_or_create(
+                                    raw_material=raw_material,
+                                    defaults={'available_quantity': Decimal('0')}
+                                )
+                                stock_balance.available_quantity -= Decimal(str(total_reserved_kg))
+                                stock_balance.save()
+                                logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Deducted {total_reserved_kg}kg from RMStockBalance for material {raw_material.material_code}")
+                    else:
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No RM to reserve (available_rm_kg = {available_rm_kg})")
+                else:
+                    if existing_allocations.exists():
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM already reserved. Existing allocations: {existing_allocations.count()}")
+                    else:
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No RM required (rm_required_kg = {mo.rm_required_kg})")
+            except Exception as alloc_error:
+                logger.error(f"[RM_RESERVATION] MO {mo.mo_id} - Failed to reserve RM during approval: {str(alloc_error)}")
+                logger.exception(alloc_error)
+                # Don't fail MO approval if RM reservation fails - just log it
+                # The MO is still approved, RM can be reserved later
+        
+        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} approved. Status: {old_status} → mo_approved. RM reserved and stock balance updated.")
         
         # Create status history
         MOStatusHistory.objects.create(
@@ -861,7 +918,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         
         serializer = ManufacturingOrderWithProcessesSerializer(mo)
         return Response({
-            'message': 'MO approved successfully! RM will be reserved when production starts.',
+            'message': 'MO approved successfully! RM has been reserved and stock balance updated.',
             'mo': serializer.data
         })
     
@@ -1450,6 +1507,225 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    @action(detail=True, methods=['post'], url_path='add-additional-rm', permission_classes=[IsAuthenticated])
+    def add_additional_rm(self, request, pk=None):
+        """
+        Add additional RM to MO by Production Head (no approval needed)
+        Only enabled for ongoing MOs (mo_approved, rm_allocated, in_progress)
+        """
+        mo = self.get_object()
+        
+        # Check if user is production_head
+        user_roles = request.user.user_roles.values_list('role__name', flat=True)
+        if 'production_head' not in user_roles:
+            return Response(
+                {'error': 'Only production heads can add additional RM'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check MO status - must be ongoing (approved by manager)
+        if mo.status not in ['mo_approved', 'rm_allocated', 'in_progress']:
+            return Response(
+                {'error': f'Cannot add additional RM for MO in {mo.status} status. MO must be approved and ongoing.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get additional RM quantity
+        additional_rm_kg = request.data.get('additional_rm_kg')
+        additional_rm_strips = request.data.get('additional_rm_strips')
+        notes = request.data.get('notes', '')
+        
+        if not additional_rm_kg and not additional_rm_strips:
+            return Response(
+                {'error': 'Either additional_rm_kg or additional_rm_strips is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate quantity
+        if additional_rm_kg:
+            try:
+                additional_rm_kg = Decimal(str(additional_rm_kg))
+                if additional_rm_kg <= 0:
+                    return Response(
+                        {'error': 'Additional RM quantity must be greater than 0'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'Invalid additional_rm_kg value'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            additional_rm_kg = Decimal('0')
+        
+        if additional_rm_strips:
+            try:
+                additional_rm_strips = int(additional_rm_strips)
+                if additional_rm_strips <= 0:
+                    return Response(
+                        {'error': 'Additional RM strips must be greater than 0'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': 'Invalid additional_rm_strips value'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            additional_rm_strips = 0
+        
+        # Check available stock
+        if not mo.product_code or not mo.product_code.material:
+            return Response(
+                {'error': 'MO must have an associated raw material'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        raw_material = mo.product_code.material
+        material_type = mo.material_type or raw_material.material_type
+        
+        # Check stock balance
+        from inventory.models import RMStockBalance, RMStockBalanceHeat
+        
+        if material_type == 'coil':
+            # For coil materials, check kg availability
+            stock_balance = RMStockBalance.objects.filter(raw_material=raw_material).first()
+            available_kg = stock_balance.available_quantity if stock_balance else Decimal('0')
+            
+            if additional_rm_kg > available_kg:
+                return Response(
+                    {
+                        'error': f'Insufficient stock. Available: {available_kg} kg, Requested: {additional_rm_kg} kg'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Convert strips to kg if provided (for coil materials, strips might be used for calculation)
+            if additional_rm_strips > 0:
+                # If strips are provided for coil, we need to calculate kg from strips
+                # This depends on product specifications
+                return Response(
+                    {'error': 'Strips cannot be used for coil materials. Please provide additional_rm_kg instead.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # For sheet materials, check strips availability
+            # Note: Stock balance for sheets might be tracked differently
+            # For now, we'll use a simplified check
+            stock_balance = RMStockBalance.objects.filter(raw_material=raw_material).first()
+            available_strips = int(stock_balance.available_quantity) if stock_balance else 0
+            
+            if additional_rm_strips > available_strips:
+                return Response(
+                    {
+                        'error': f'Insufficient stock. Available: {available_strips} strips, Requested: {additional_rm_strips} strips'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # For sheet materials, convert strips to kg for allocation
+            # Calculate kg equivalent based on MO's original rm_required_kg and strips_required
+            if mo.strips_required and mo.strips_required > 0 and mo.rm_required_kg:
+                # Calculate kg per strip
+                kg_per_strip = Decimal(str(mo.rm_required_kg)) / Decimal(str(mo.strips_required))
+                additional_rm_kg = Decimal(str(additional_rm_strips)) * kg_per_strip
+            else:
+                # Fallback: use product calculation if available
+                if mo.product_code and hasattr(mo.product_code, 'calculate_strips_required'):
+                    # Estimate kg from strips (simplified)
+                    additional_rm_kg = Decimal(str(additional_rm_strips)) * Decimal('0.1')  # Placeholder
+                else:
+                    additional_rm_kg = Decimal('0')
+        
+        # Update MO with additional RM
+        with transaction.atomic():
+            # Update additional RM fields
+            if material_type == 'coil':
+                mo.additional_rm_added_by_ph_kg = (mo.additional_rm_added_by_ph_kg or Decimal('0')) + additional_rm_kg
+            else:
+                # For sheet materials, track both strips and kg
+                mo.additional_rm_added_by_ph_strips = (mo.additional_rm_added_by_ph_strips or 0) + additional_rm_strips
+                mo.additional_rm_added_by_ph_kg = (mo.additional_rm_added_by_ph_kg or Decimal('0')) + additional_rm_kg
+            
+            mo.last_additional_rm_added_by_ph_at = timezone.now()
+            mo.additional_rm_added_by_ph_user = request.user
+            mo.save()
+            
+            # Allocate additional RM (create new allocation)
+            from manufacturing.services.rm_allocation import RMAllocationService
+            from manufacturing.models import RawMaterialAllocation
+            
+            # Create allocation for additional RM (for both coil and sheet, we allocate in kg)
+            additional_allocation = RawMaterialAllocation.objects.create(
+                mo=mo,
+                raw_material=raw_material,
+                allocated_quantity_kg=additional_rm_kg,
+                status='reserved',
+                can_be_swapped=False,  # PH-added RM cannot be swapped
+                allocated_by=request.user,
+                notes=f"Additional RM added by Production Head: {additional_rm_kg} kg ({additional_rm_strips if material_type == 'sheet' else 'N/A'} strips). {notes}"
+            )
+            
+            # Deduct from stock balance
+            if material_type == 'coil':
+                stock_balance.available_quantity -= additional_rm_kg
+            else:
+                # For sheet materials, deduct strips from available quantity
+                stock_balance.available_quantity -= Decimal(str(additional_rm_strips))
+            stock_balance.save()
+            
+            # Create transaction history
+            from inventory.transaction_manager import InventoryTransactionManager
+            from inventory.utils import generate_transaction_id
+            from manufacturing.models import MOTransactionHistory
+            
+            transaction_id = generate_transaction_id('MO_ADDITIONAL_RM_ADDED')
+            MOTransactionHistory.objects.create(
+                mo=mo,
+                transaction_type='additional_rm_added',
+                transaction_id=transaction_id,
+                description=f'Additional RM added by Production Head: {additional_rm_kg if material_type == "coil" else additional_rm_strips} {material_type == "coil" and "kg" or "strips"}',
+                details={
+                    'additional_rm_kg': float(additional_rm_kg) if material_type == 'coil' else None,
+                    'additional_rm_strips': additional_rm_strips if material_type == 'sheet' else None,
+                    'material_type': material_type,
+                    'added_by': request.user.get_full_name() or request.user.email,
+                    'notes': notes,
+                    'previous_total_rm_limit_kg': float(mo.rm_required_kg or 0),
+                    'new_total_rm_limit_kg': float(mo.total_rm_limit_kg)
+                },
+                created_by=request.user
+            )
+            
+            # Send notification to manager
+            try:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                managers = User.objects.filter(
+                    user_roles__role__name='manager',
+                    user_roles__is_active=True
+                ).distinct()
+                
+                # Create notifications for managers (you can implement notification system here)
+                # For now, we'll just log it
+                logger.info(f"Additional RM added by PH {request.user.email} for MO {mo.mo_id}. Notifying managers.")
+                for manager in managers:
+                    logger.info(f"  - Manager: {manager.email}")
+            except Exception as e:
+                logger.warning(f"Failed to send notifications to managers: {str(e)}")
+        
+        serializer = self.get_serializer(mo)
+        return Response({
+            'message': f'Additional RM added successfully. Total allocated RM: {mo.total_rm_limit_kg} kg',
+            'mo': serializer.data,
+            'additional_rm_added': {
+                'kg': float(additional_rm_kg) if material_type == 'coil' else None,
+                'strips': additional_rm_strips if material_type == 'sheet' else None,
+                'added_at': mo.last_additional_rm_added_by_ph_at.isoformat(),
+                'added_by': request.user.get_full_name() or request.user.email
+            }
+        }, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['get'])
     def location_tracking(self, request, pk=None):
         """
@@ -1673,6 +1949,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         """Use different serializers for list and detail views"""
         if self.action == 'list':
             return PurchaseOrderListSerializer
+        # Check if minimal response is requested (for status updates)
+        if self.action == 'retrieve' and self.request.query_params.get('minimal') == 'true':
+            from manufacturing.core_serializers import PurchaseOrderStatusSerializer
+            return PurchaseOrderStatusSerializer
         return PurchaseOrderDetailSerializer
 
     @action(detail=True, methods=['post'])
@@ -1724,6 +2004,13 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             # When PO is completed, update related MO to clear RM pending status
             if po.related_mo:
                 mo = po.related_mo
+                # If RM was pending from PO, update rm_required_kg to include pending PO quantity
+                if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                    from decimal import Decimal
+                    # Update rm_required_kg to include the pending PO quantity
+                    mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
+                    logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
+                
                 mo.rm_pending_from_po = False
                 mo.pending_po_quantity_kg = None
                 mo.save()
@@ -1759,8 +2046,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             notes=notes
         )
         
-        serializer = self.get_serializer(po)
-        return Response(serializer.data)
+        # Return minimal response - only po_id and status
+        from manufacturing.core_serializers import PurchaseOrderStatusSerializer
+        serializer = PurchaseOrderStatusSerializer(po)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'])
     def dashboard_stats(self, request):
@@ -2567,6 +2856,22 @@ class BatchViewSet(viewsets.ModelViewSet):
                     float((cumulative_rm_released / Decimal(str(total_rm_required))) * Decimal('100'))
                 )
         
+        # Get available RM for batch creation (considering PO pending status)
+        available_rm_for_batch = float(mo.available_rm_for_batch_kg) if rm_unit == 'kg' else remaining_rm
+        
+        # Get PO pending information
+        related_pos_info = []
+        if mo.rm_pending_from_po:
+            related_pos = mo.related_purchase_orders.all()
+            for po in related_pos:
+                related_pos_info.append({
+                    'po_id': po.po_id,
+                    'status': po.status,
+                    'status_display': po.get_status_display(),
+                    'quantity_ordered': float(po.quantity_ordered) if po.quantity_ordered else None,
+                    'quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                })
+        
         return Response({
             'mo_id': mo.mo_id,
             'mo_quantity': mo.quantity,
@@ -2577,10 +2882,15 @@ class BatchViewSet(viewsets.ModelViewSet):
             'cumulative_scrap_rm': float(cumulative_scrap_rm),
             'mo_scrap_rm': float(mo_scrap_kg),
             'remaining_rm': remaining_rm,
+            'available_rm_for_batch': available_rm_for_batch,  # Available RM considering PO pending status
             'completion_percentage': round(completion_percentage, 2),
             'batch_count': batches.count(),
             'batches': batch_details,
-            'tolerance_percentage': float(mo.tolerance_percentage) if mo.tolerance_percentage else 2.00
+            'tolerance_percentage': float(mo.tolerance_percentage) if mo.tolerance_percentage else 2.00,
+            'rm_pending_from_po': mo.rm_pending_from_po,
+            'pending_po_quantity_kg': float(mo.pending_po_quantity_kg) if mo.pending_po_quantity_kg else None,
+            'related_purchase_orders': related_pos_info,
+            'can_create_batch': mo.can_create_batch,
         })
     
     @action(detail=True, methods=['post'], url_path='add-scrap-rm')
