@@ -7,6 +7,8 @@ from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from decimal import Decimal
+import logging
 
 from manufacturing.models import (
     ManufacturingOrder, MOApprovalWorkflow, ProcessAssignment, 
@@ -52,7 +54,14 @@ class ManufacturingWorkflowService:
     def approve_mo(mo_id, manager_user, approval_notes=""):
         """
         Manager approves MO and moves to RM allocation phase
+        Reserve RM and reduce stock balance when MO is approved
         """
+        from manufacturing.services.rm_allocation import RMAllocationService
+        from manufacturing.models import RawMaterialAllocation
+        from inventory.models import RMStockBalance
+        
+        logger = logging.getLogger(__name__)
+        
         with transaction.atomic():
             try:
                 mo = ManufacturingOrder.objects.get(id=mo_id)
@@ -73,6 +82,51 @@ class ManufacturingWorkflowService:
                 mo.gm_approved_at = timezone.now()
                 mo.gm_approved_by = manager_user
                 mo.save()
+                
+                # Reserve RM and reduce stock balance when MO is approved
+                try:
+                    # Check if RM allocations already exist
+                    existing_allocations = RawMaterialAllocation.objects.filter(mo=mo, status__in=['reserved', 'locked'])
+                    
+                    if not existing_allocations.exists() and mo.rm_required_kg and mo.rm_required_kg > 0:
+                        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Approving MO via workflow. Reserving RM...")
+                        
+                        # Check if RM is pending from PO
+                        if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                            # Only reserve available portion (excluding pending PO quantity)
+                            available_rm_kg = mo.rm_required_kg - mo.pending_po_quantity_kg
+                            logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM pending from PO. Reserving available portion: {available_rm_kg}kg")
+                        else:
+                            # Reserve full required quantity
+                            available_rm_kg = mo.rm_required_kg
+                            logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No pending PO. Reserving full required quantity: {available_rm_kg}kg")
+                        
+                        # Reserve RM if quantity is positive
+                        if available_rm_kg > 0:
+                            reservation_result = RMAllocationService.allocate_rm_for_mo(mo, manager_user)
+                            logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM allocated as RESERVED: {len(reservation_result) if reservation_result else 0}")
+                            
+                            if reservation_result:
+                                # Decrement RMStockBalance available_quantity for reserved qty
+                                raw_material = mo.product_code.material
+                                if raw_material:
+                                    total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                                    stock_balance, _ = RMStockBalance.objects.get_or_create(
+                                        raw_material=raw_material,
+                                        defaults={'available_quantity': Decimal('0')}
+                                    )
+                                    stock_balance.available_quantity -= Decimal(str(total_reserved_kg))
+                                    stock_balance.save()
+                                    logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Deducted {total_reserved_kg}kg from RMStockBalance for material {raw_material.material_code}")
+                    else:
+                        if existing_allocations.exists():
+                            logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM already reserved. Existing allocations: {existing_allocations.count()}")
+                        else:
+                            logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No RM required (rm_required_kg = {mo.rm_required_kg})")
+                except Exception as alloc_error:
+                    logger.error(f"[RM_RESERVATION] MO {mo.mo_id} - Failed to reserve RM during workflow approval: {str(alloc_error)}")
+                    logger.exception(alloc_error)
+                    # Don't fail MO approval if RM reservation fails - just log it
                 
                 # Send notifications
                 ManufacturingWorkflowService._send_mo_approved_notification(mo, manager_user)

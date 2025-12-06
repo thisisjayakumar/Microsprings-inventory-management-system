@@ -8,6 +8,10 @@ from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from decimal import Decimal
+import logging
+
+logger = logging.getLogger(__name__)
+from decimal import Decimal
 
 from products.models import Product
 from .models import (
@@ -139,6 +143,12 @@ class RMStockBalanceViewSet(viewsets.ModelViewSet):
     ViewSet for RMStockBalance management - accessible by RM Store users
     """
     permission_classes = [IsAuthenticated, IsRMStoreUser]
+    
+    def get_permissions(self):
+        """Allow read access for by_material and by_product endpoints to all authenticated users"""
+        if self.action in ['by_material', 'by_product']:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRMStoreUser()]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['raw_material__material_code', 'raw_material__material_name']
     ordering_fields = ['available_quantity', 'last_updated']
@@ -215,6 +225,123 @@ class RMStockBalanceViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], url_path='by-material/(?P<material_id>[^/.]+)')
+    def by_material(self, request, material_id=None):
+        """
+        Get stock balance for a specific material by material ID
+        Returns only material_code and available_quantity (optimized endpoint)
+        """
+        try:
+            # Try to get from RMStockBalanceHeat first (more accurate)
+            from inventory.models import RMStockBalanceHeat
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('raw_material__material_code', 'total_available_quantity_kg', 'raw_material__material_type').first()
+            
+            if stock_balance_heat:
+                return Response({
+                    'material_code': stock_balance_heat.raw_material.material_code,
+                    'available_quantity': float(stock_balance_heat.total_available_quantity_kg),
+                    'material_type': stock_balance_heat.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # Fallback to RMStockBalance
+            stock_balance = RMStockBalance.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('raw_material__material_code', 'available_quantity', 'raw_material__material_type').first()
+            
+            if stock_balance:
+                return Response({
+                    'material_code': stock_balance.raw_material.material_code,
+                    'available_quantity': float(stock_balance.available_quantity),
+                    'material_type': stock_balance.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # If no stock balance found, try to get material info and return 0 stock
+            raw_material = RawMaterial.objects.only('material_code', 'material_type').get(id=material_id)
+            return Response({
+                'material_code': raw_material.material_code,
+                'available_quantity': 0.0,
+                'material_type': raw_material.material_type
+            }, status=status.HTTP_200_OK)
+            
+        except RawMaterial.DoesNotExist:
+            return Response(
+                {'error': 'Raw material not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch stock balance: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'], url_path='by-product/(?P<product_id>[^/.]+)', permission_classes=[IsAuthenticated])
+    def by_product(self, request, product_id=None):
+        """
+        Get stock balance for a material by product_code_id
+        Resolves product_code -> material -> stock balance
+        Returns only available_quantity and material_type (optimized endpoint)
+        """
+        try:
+            from products.models import Product
+            from inventory.models import RMStockBalanceHeat
+            
+            # Get product and its material
+            product = Product.objects.select_related('material').only('id', 'material_id', 'material__id').get(id=product_id)
+            material_id = product.material_id
+            
+            if not material_id:
+                return Response(
+                    {'error': 'Product does not have an associated material'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Try to get from RMStockBalanceHeat first (more accurate)
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('total_available_quantity_kg', 'raw_material__material_type').first()
+            
+            if stock_balance_heat:
+                return Response({
+                    'available_quantity': float(stock_balance_heat.total_available_quantity_kg),
+                    'material_type': stock_balance_heat.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # Fallback to RMStockBalance
+            stock_balance = RMStockBalance.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('available_quantity', 'raw_material__material_type').first()
+            
+            if stock_balance:
+                return Response({
+                    'available_quantity': float(stock_balance.available_quantity),
+                    'material_type': stock_balance.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+
+            # If no stock balance exists, get material type and return 0
+            raw_material = RawMaterial.objects.only('material_type').get(id=material_id)
+            return Response({
+                'available_quantity': 0.0,
+                'material_type': raw_material.material_type
+            }, status=status.HTTP_200_OK)
+
+        except Product.DoesNotExist:
+            return Response(
+                {'error': 'Product not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except RawMaterial.DoesNotExist:
+            return Response(
+                {'error': 'Raw material not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch stock balance: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class RawMaterialViewSet(viewsets.ModelViewSet):
@@ -430,6 +557,12 @@ class GRMReceiptViewSet(viewsets.ModelViewSet):
         # When PO is completed, update related MO to clear RM pending status
         if po.related_mo:
             mo = po.related_mo
+            # If RM was pending from PO, update rm_required_kg to include pending PO quantity
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                # Update rm_required_kg to include the pending PO quantity
+                mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
+                logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
+            
             mo.rm_pending_from_po = False
             mo.pending_po_quantity_kg = None
             mo.save()
