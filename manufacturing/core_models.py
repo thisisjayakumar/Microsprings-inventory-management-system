@@ -662,9 +662,9 @@ class PurchaseOrder(models.Model):
             self.gst_no_auto = self.vendor_name.gst_no
             self.mob_no_auto = self.vendor_name.contact_no
         
-        # Calculate total amount
-        if self.quantity_ordered and self.unit_price:
-            self.total_amount = self.quantity_ordered * self.unit_price
+        # Calculate total amount - COMMENTED OUT (fields kept in DB for future use)
+        # if self.quantity_ordered and self.unit_price:
+        #     self.total_amount = self.quantity_ordered * self.unit_price
         
         super().save(*args, **kwargs)
 

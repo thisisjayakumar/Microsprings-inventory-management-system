@@ -4,5 +4,6 @@ venv/
 *.pyd
 __pycache__/
 .env
+env/
 logs/
 staticfiles/

@@ -585,11 +585,11 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
         model = PurchaseOrder
         fields = [
             'id', 'po_id', 'date_time', 'rm_code', 'vendor_name', 'quantity_ordered', 'quantity_received',
-            'unit_price', 'total_amount', 'status', 'status_display', 'material_type',
+            'status', 'status_display', 'material_type',
             'material_type_display', 'expected_date', 'created_by', 'created_at',
             'cancelled_at', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason'
         ]
-        read_only_fields = ['po_id', 'date_time', 'total_amount']
+        read_only_fields = ['po_id', 'date_time']
 
 
 # Process Execution Serializers
@@ -906,7 +906,7 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
             'thickness_mm_auto', 'finishing_auto', 'manufacturer_brand_auto', 'kg_auto',
             'sheet_roll_auto', 'qty_sheets_auto', 'vendor_name', 'vendor_name_id',
             'vendor_address_auto', 'gst_no_auto', 'mob_no_auto', 'expected_date',
-            'quantity_ordered', 'quantity_received', 'unit_price', 'total_amount', 'status', 'status_display',
+            'quantity_ordered', 'quantity_received', 'status', 'status_display',
             'submitted_at', 'approved_at', 'approved_by', 'cancelled_at',
             'cancelled_by', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason',
             'terms_conditions', 'notes', 'related_mo', 'related_mo_id', 'related_mo_id_display',
@@ -916,7 +916,7 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'po_id', 'date_time', 'material_type', 'material_auto', 'grade_auto', 'finishing_auto',
             'wire_diameter_mm_auto', 'thickness_mm_auto', 'kg_auto', 'sheet_roll_auto', 'qty_sheets_auto',
-            'vendor_address_auto', 'gst_no_auto', 'mob_no_auto', 'total_amount',
+            'vendor_address_auto', 'gst_no_auto', 'mob_no_auto',
             'submitted_at', 'approved_at', 'approved_by', 'cancelled_at',
             'cancelled_by', 'created_at', 'updated_at'
         ]
@@ -981,8 +981,6 @@ class PurchaseOrderDetailSerializer(serializers.ModelSerializer):
                 description=f'PO {po.po_id} created for {po.rm_code.material_name}',
                 details={
                     'quantity_ordered': po.quantity_ordered,
-                    'unit_price': float(po.unit_price),
-                    'total_amount': float(po.total_amount),
                     'material_name': po.rm_code.material_name,
                     'material_code': po.rm_code.material_code,
                     'vendor_name': po.vendor_name.name,
