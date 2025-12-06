@@ -11,7 +11,7 @@ from .models import (
 
 
 class RawMaterialBasicSerializer(serializers.ModelSerializer):
-    """Basic raw material serializer for nested relationships"""
+    """Optimized raw material serializer - returns only fields shown in frontend"""
     material_name_display = serializers.CharField(source='material_name', read_only=True)
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     finishing_display = serializers.CharField(source='get_finishing_display', read_only=True)
@@ -20,10 +20,9 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
     class Meta:
         model = RawMaterial
         fields = [
-            'id', 'material_code', 'material_name', 'material_name_display',
-            'material_type', 'material_type_display', 'grade', 'wire_diameter_mm',
-            'thickness_mm', 'finishing', 'finishing_display', 'weight_kg', 'available_quantity',
-            'length_mm', 'breadth_mm', 'quantity'
+            'id', 'material_code', 'material_name_display',
+            'material_type_display', 'grade', 'wire_diameter_mm',
+            'finishing_display', 'available_quantity'
         ]
         read_only_fields = fields
     

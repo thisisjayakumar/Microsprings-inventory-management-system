@@ -35,7 +35,9 @@ urlpatterns = [
     
     # Material Heat Numbers and Coils APIs
     path('materials/heat-numbers-coils/', views.get_material_heat_numbers_coils, name='get_material_heat_numbers_coils'),
-    path('materials/delete-coils/', views.delete_coils_by_heat_numbers, name='delete_coils_by_heat_numbers'),
+    path('materials/return-coils/', views.return_coils_to_vendor, name='return_coils_to_vendor'),
+    path('materials/delete-coils/', views.delete_coils_by_heat_numbers, name='delete_coils_by_heat_numbers'),  # Keep for backward compatibility
+    path('rm-store-returns/', views.get_rm_store_returns, name='get_rm_store_returns'),
     
     # Include router URLs
     path('', include(router.urls)),
