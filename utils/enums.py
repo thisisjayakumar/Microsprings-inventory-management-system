@@ -91,6 +91,7 @@ class ReferenceTypeChoices(models.TextChoices):
     PO = 'po', _('Purchase Order')
     PROCESS = 'process', _('Process Execution')
     ADJUSTMENT = 'adjustment', _('Stock Adjustment')
+    RM_RETURN = 'rm_return', _('RM Return to Vendor')
 
 
 class GRMStatusChoices(models.TextChoices):

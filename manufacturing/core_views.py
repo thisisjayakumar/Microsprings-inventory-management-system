@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, status, filters, pagination
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -54,9 +54,10 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsManagerOrSupervisor]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'priority', 'shift', 'material_type']
-    search_fields = ['mo_id', 'product_code__product_code', 'product_code__spring_type', 'material_name', 'grade', 'customer_name', 'special_instructions']
+    search_fields = ['mo_id', 'product_code__product_code', 'product_code__display_name', 'product_code__material__material_name']
     ordering_fields = ['created_at', 'planned_start_date', 'delivery_date', 'mo_id']
     ordering = ['-created_at']
+    pagination_class = pagination.LimitOffsetPagination
 
     def get_queryset(self):
         """Optimized queryset with select_related and prefetch_related"""
@@ -1910,9 +1911,10 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsManagerOrRMStore]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'material_type', 'vendor_name', 'expected_date']
-    search_fields = ['po_id', 'rm_code__product_code', 'vendor_name__name']
+    search_fields = ['po_id', 'rm_code__material_code', 'rm_code__material_name', 'vendor_name__name']
     ordering_fields = ['created_at', 'expected_date', 'po_id', 'total_amount']
     ordering = ['-created_at']
+    pagination_class = pagination.LimitOffsetPagination
 
     def get_queryset(self):
         """Optimized queryset with select_related and prefetch_related"""
