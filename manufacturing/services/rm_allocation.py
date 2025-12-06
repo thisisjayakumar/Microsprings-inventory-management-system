@@ -45,12 +45,26 @@ class RMAllocationService:
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Raw material: {raw_material.material_code} (ID: {raw_material.id})")
             
             # Calculate required quantity
-            required_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
-            logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity: {required_quantity_kg}kg")
+            # If RM is pending from PO, only allocate available RM (excluding pending PO quantity)
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                # Check if related PO is completed
+                related_pos = mo.related_purchase_orders.filter(status='rm_completed')
+                if not related_pos.exists():
+                    # PO not completed - only allocate available RM (excluding pending PO quantity)
+                    required_quantity_kg = Decimal(str(mo.rm_required_kg)) - Decimal(str(mo.pending_po_quantity_kg))
+                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - RM pending from PO. Allocating only available RM: {required_quantity_kg}kg (Total: {mo.rm_required_kg}kg, Pending: {mo.pending_po_quantity_kg}kg)")
+                else:
+                    # PO completed - allocate full required quantity
+                    required_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
+                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - PO completed. Allocating full required quantity: {required_quantity_kg}kg")
+            else:
+                # No pending PO - allocate full required quantity
+                required_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
+                logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity: {required_quantity_kg}kg")
             
             if required_quantity_kg <= 0:
-                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity is 0 or negative. Possible cause: rm_required_kg not calculated")
-                raise ValidationError("Required RM quantity must be greater than 0. Ensure MO.calculate_rm_requirements() was called.")
+                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity is 0 or negative. Possible cause: rm_required_kg not calculated or all RM is pending from PO")
+                raise ValidationError("Required RM quantity must be greater than 0. Ensure MO.calculate_rm_requirements() was called or wait for PO completion.")
             
             # Check if stock is available
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Checking stock for material ID: {raw_material.id}")

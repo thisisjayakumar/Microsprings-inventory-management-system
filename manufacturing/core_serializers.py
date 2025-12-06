@@ -38,6 +38,7 @@ class ProductBasicSerializer(serializers.ModelSerializer):
     finishing = serializers.CharField(read_only=True)
     weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
     material_type = serializers.CharField(read_only=True)
+    material_id = serializers.IntegerField(source='material.id', read_only=True)  # Direct material ID access
     
     class Meta:
         model = Product
@@ -47,7 +48,7 @@ class ProductBasicSerializer(serializers.ModelSerializer):
             'wire_diameter_mm', 'thickness_mm', 'finishing', 'weight_kg', 
             'customer_name', 'customer_id', 'grams_per_product', 'length_mm', 'breadth_mm',
             'whole_sheet_length_mm', 'whole_sheet_breadth_mm', 'strip_length_mm', 
-            'strip_breadth_mm', 'strips_per_sheet', 'pcs_per_strip'
+            'strip_breadth_mm', 'strips_per_sheet', 'pcs_per_strip', 'material_id'
         ]
         read_only_fields = fields
 
@@ -295,6 +296,36 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     shift_display = serializers.CharField(source='get_shift_display', read_only=True)
     
+    # Additional RM fields added by PH (using SerializerMethodField to avoid validation issues)
+    additional_rm_added_by_ph_kg = serializers.SerializerMethodField(read_only=True)
+    additional_rm_added_by_ph_strips = serializers.SerializerMethodField(read_only=True)
+    last_additional_rm_added_by_ph_at = serializers.SerializerMethodField(read_only=True)
+    additional_rm_added_by_ph_user = serializers.SerializerMethodField(read_only=True)
+    
+    def get_additional_rm_added_by_ph_kg(self, obj):
+        """Get additional RM added by PH in kg"""
+        if hasattr(obj, 'additional_rm_added_by_ph_kg'):
+            return float(obj.additional_rm_added_by_ph_kg) if obj.additional_rm_added_by_ph_kg else 0.0
+        return 0.0
+    
+    def get_additional_rm_added_by_ph_strips(self, obj):
+        """Get additional RM added by PH in strips"""
+        if hasattr(obj, 'additional_rm_added_by_ph_strips'):
+            return obj.additional_rm_added_by_ph_strips or 0
+        return 0
+    
+    def get_last_additional_rm_added_by_ph_at(self, obj):
+        """Get timestamp when additional RM was last added by PH"""
+        if hasattr(obj, 'last_additional_rm_added_by_ph_at') and obj.last_additional_rm_added_by_ph_at:
+            return obj.last_additional_rm_added_by_ph_at.isoformat()
+        return None
+    
+    def get_additional_rm_added_by_ph_user(self, obj):
+        """Get user who added additional RM"""
+        if hasattr(obj, 'additional_rm_added_by_ph_user') and obj.additional_rm_added_by_ph_user:
+            return obj.additional_rm_added_by_ph_user.get_full_name() or obj.additional_rm_added_by_ph_user.email
+        return None
+    
     # Write-only fields for creation
     product_code_id = serializers.IntegerField(write_only=True)
     # NOTE: assigned_rm_store_id removed - all RM store users see all MOs
@@ -333,7 +364,9 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
             'delivery_date', 'special_instructions', 'submitted_at', 'gm_approved_at', 
             'gm_approved_by', 'rm_allocated_at', 'rm_allocated_by', 'created_at', 
             'created_by', 'updated_at', 'status_history', 'transaction_history', 'rm_returns',
-            'related_purchase_orders'
+            'related_purchase_orders', 'additional_rm_approved_kg', 'last_additional_rm_approval_at',
+            'additional_rm_added_by_ph_kg', 'additional_rm_added_by_ph_strips', 
+            'last_additional_rm_added_by_ph_at', 'additional_rm_added_by_ph_user'
         ]
         read_only_fields = [
             'mo_id', 'date_time', 'product_type', 'material_name', 'material_type',
@@ -414,6 +447,10 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
         mo.calculate_rm_requirements()
         mo.save()
         
+        # NOTE: RM reservation is now done when MO is approved by GM/Manager, not during creation
+        # This ensures RM is only reserved for approved MOs and stock balance is updated accordingly
+        logger.info(f"[RM_RESERVATION] MO {mo.mo_id} created. RM will be reserved when MO is approved by GM/Manager.")
+        
         # Create MO creation transaction history
         try:
             from inventory.transaction_manager import InventoryTransactionManager
@@ -453,9 +490,8 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
         except Exception as e:
             logger.warning(f"Failed to create MO creation transaction history: {str(e)}")
         
-        # NOTE: RM allocation is NOT done during MO creation
-        # RM will be reserved when production starts (via start_production action)
-        logger.info(f"MO {mo.mo_id} created. RM will be reserved when production starts.")
+        # RM is now reserved immediately when MO is created (see above)
+        logger.info(f"MO {mo.mo_id} created. RM reserved during creation.")
         
         # Automatically create MO workflow and send notifications to managers
         try:
@@ -569,6 +605,16 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
             }
             for po in related_pos
         ]
+
+
+class PurchaseOrderStatusSerializer(serializers.ModelSerializer):
+    """Minimal serializer for PO status updates - only po_id and status"""
+    class Meta:
+        model = PurchaseOrder
+        fields = ['id', 'po_id', 'status', 'status_display']
+        read_only_fields = ['id', 'po_id', 'status', 'status_display']
+    
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
 
 class PurchaseOrderListSerializer(serializers.ModelSerializer):
@@ -1126,6 +1172,22 @@ class BatchDetailSerializer(serializers.ModelSerializer):
                 f"Cannot create batch for MO in {mo.status} status. MO must be in On Hold or In Progress status."
             )
         
+        # Check if batch can be created (includes PO pending check)
+        if not mo.can_create_batch:
+            if mo.rm_pending_from_po:
+                related_pos = mo.related_purchase_orders.all()
+                pending_pos = [po for po in related_pos if po.status != 'rm_completed']
+                if pending_pos:
+                    po_list = ', '.join([po.po_id for po in pending_pos])
+                    raise serializers.ValidationError(
+                        f"Cannot create batch. Raw material is pending from Purchase Order(s): {po_list}. "
+                        f"Please wait for PO completion before releasing additional batches. "
+                        f"Available RM for batch: {float(mo.available_rm_for_batch_kg):.3f} kg"
+                    )
+            raise serializers.ValidationError(
+                f"Cannot create batch for MO {mo.mo_id}. Check RM allocation status."
+            )
+        
         # Handle operator assignment
         operator = None
         if assigned_operator_id:
@@ -1158,6 +1220,24 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         rm_final_kg = rm_base_kg * tolerance_factor
         
         logger.info(f"Batch RM allocation: Base={rm_base_kg}kg, Tolerance={tolerance}%, Final={rm_final_kg}kg")
+        
+        # Validate that batch RM doesn't exceed available RM (considering PO pending status)
+        available_rm = mo.available_rm_for_batch_kg
+        if rm_final_kg > available_rm:
+            if mo.rm_pending_from_po:
+                related_pos = mo.related_purchase_orders.all()
+                pending_pos = [po for po in related_pos if po.status != 'rm_completed']
+                if pending_pos:
+                    po_list = ', '.join([po.po_id for po in pending_pos])
+                    raise serializers.ValidationError(
+                        f"Cannot create batch. Batch RM ({float(rm_final_kg):.3f} kg) exceeds available RM "
+                        f"({float(available_rm):.3f} kg). Raw material is pending from Purchase Order(s): {po_list}. "
+                        f"Please wait for PO completion or reduce batch quantity."
+                    )
+            raise serializers.ValidationError(
+                f"Cannot create batch. Batch RM ({float(rm_final_kg):.3f} kg) exceeds available RM "
+                f"({float(available_rm):.3f} kg)."
+            )
         
         # Don't add rm_released_kg to validated_data - Batch model doesn't have this field
         # The RM tracking is done via planned_quantity (in grams)

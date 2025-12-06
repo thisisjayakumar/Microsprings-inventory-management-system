@@ -505,6 +505,9 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
     
     def create(self, validated_data):
         """Create GRM receipt with heat numbers"""
+        from decimal import Decimal
+        from inventory.models import RMStockBalance
+        
         heat_numbers_data = validated_data.pop('heat_numbers_data', [])
         quantity_received = validated_data.pop('quantity_received', None)
         
@@ -519,10 +522,26 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
             grm_receipt.purchase_order.quantity_received = quantity_received
             grm_receipt.purchase_order.save()
         
-        # Create heat numbers
+        # Create heat numbers and update stock balances
         for i, heat_data in enumerate(heat_numbers_data):
             try:
-                HeatNumber.objects.create(grm_receipt=grm_receipt, **heat_data)
+                heat_number = HeatNumber.objects.create(grm_receipt=grm_receipt, **heat_data)
+                
+                # Update RMStockBalance available_quantity for this raw material
+                raw_material = heat_data.get('raw_material')
+                total_weight = heat_data.get('total_weight_kg', 0)
+                
+                if raw_material and total_weight:
+                    stock_balance, created = RMStockBalance.objects.get_or_create(
+                        raw_material=raw_material,
+                        defaults={'available_quantity': Decimal('0')}
+                    )
+                    # Add the weight to available quantity
+                    stock_balance.available_quantity += Decimal(str(total_weight))
+                    stock_balance.save()
+                    
+                # Update heat-tracked stock balance
+                heat_number.update_stock_balance()
             except Exception as e:
                 raise e
         
@@ -943,3 +962,76 @@ class RMReturnDispositionSerializer(serializers.Serializer):
                         logger.warning(f"Failed to update heat stock balance for vendor return: {e}")
         
         return instance
+
+
+# Serializers for Material Heat Numbers and Coils APIs
+
+class CoilSerializer(serializers.Serializer):
+    """Serializer for coil information"""
+    number = serializers.CharField(help_text="Coil number")
+    weight = serializers.DecimalField(max_digits=10, decimal_places=3, help_text="Weight in kg")
+
+
+class HeatNumberWithCoilsSerializer(serializers.Serializer):
+    """Serializer for heat number with its coils"""
+    id = serializers.IntegerField()
+    heat_number = serializers.CharField()
+    grm_number = serializers.CharField(source='grm_receipt.grm_number')
+    total_weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3)
+    coils_received = serializers.IntegerField()
+    available_quantity_kg = serializers.SerializerMethodField()
+    coils = serializers.SerializerMethodField()
+    
+    def get_available_quantity_kg(self, obj):
+        """Get remaining available quantity in KG"""
+        return float(obj.get_available_quantity_kg())
+    
+    def get_coils(self, obj):
+        """Get all coils for this heat number"""
+        coils = []
+        if obj.items:
+            for item in obj.items:
+                coils.append({
+                    'number': item.get('number', ''),
+                    'weight': float(item.get('weight', 0)) if item.get('weight') else 0
+                })
+        return coils
+
+
+class MaterialHeatNumbersResponseSerializer(serializers.Serializer):
+    """Serializer for material heat numbers API response"""
+    material_code = serializers.CharField()
+    material_name = serializers.CharField()
+    heat_numbers = HeatNumberWithCoilsSerializer(many=True)
+
+
+class DeleteCoilsRequestSerializer(serializers.Serializer):
+    """Serializer for delete coils API request"""
+    material_code = serializers.CharField(help_text="Material code")
+    heat_numbers = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="List of heat numbers to delete coils from"
+    )
+    
+    def validate_material_code(self, value):
+        """Validate that material code exists"""
+        try:
+            RawMaterial.objects.get(material_code=value)
+        except RawMaterial.DoesNotExist:
+            raise serializers.ValidationError(f"Material code '{value}' does not exist")
+        return value
+    
+    def validate_heat_numbers(self, value):
+        """Validate that heat numbers list is not empty"""
+        if not value:
+            raise serializers.ValidationError("At least one heat number must be provided")
+        return value
+
+
+class DeleteCoilsResponseSerializer(serializers.Serializer):
+    """Serializer for delete coils API response"""
+    message = serializers.CharField()
+    material_code = serializers.CharField()
+    deleted_heat_numbers = serializers.ListField(child=serializers.CharField())
+    deleted_coils_count = serializers.IntegerField()
+    updated_heat_numbers = serializers.ListField(child=serializers.CharField())

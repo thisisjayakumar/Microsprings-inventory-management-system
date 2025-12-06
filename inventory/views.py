@@ -7,6 +7,11 @@ from django.db.models import Q, Prefetch, Sum
 from django.db import transaction
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from decimal import Decimal
+import logging
+
+logger = logging.getLogger(__name__)
+from decimal import Decimal
 
 from products.models import Product
 from .models import (
@@ -22,7 +27,9 @@ from .serializers import (
     GRMReceiptListSerializer, HeatNumberSerializer, RMStockBalanceHeatSerializer,
     InventoryTransactionHeatSerializer, HeatNumberHandoverSerializer,
     HandoverIssueSerializer, HandoverIssueCreateSerializer, HandoverVerifySerializer,
-    RMReturnSerializer, RMReturnCreateSerializer, RMReturnDispositionSerializer
+    RMReturnSerializer, RMReturnCreateSerializer, RMReturnDispositionSerializer,
+    MaterialHeatNumbersResponseSerializer, DeleteCoilsRequestSerializer,
+    DeleteCoilsResponseSerializer
 )
 from .transaction_manager import InventoryTransactionManager
 from authentication.models import UserRole, Role
@@ -136,6 +143,12 @@ class RMStockBalanceViewSet(viewsets.ModelViewSet):
     ViewSet for RMStockBalance management - accessible by RM Store users
     """
     permission_classes = [IsAuthenticated, IsRMStoreUser]
+    
+    def get_permissions(self):
+        """Allow read access for by_material and by_product endpoints to all authenticated users"""
+        if self.action in ['by_material', 'by_product']:
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsRMStoreUser()]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['raw_material__material_code', 'raw_material__material_name']
     ordering_fields = ['available_quantity', 'last_updated']
@@ -212,6 +225,123 @@ class RMStockBalanceViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], url_path='by-material/(?P<material_id>[^/.]+)')
+    def by_material(self, request, material_id=None):
+        """
+        Get stock balance for a specific material by material ID
+        Returns only material_code and available_quantity (optimized endpoint)
+        """
+        try:
+            # Try to get from RMStockBalanceHeat first (more accurate)
+            from inventory.models import RMStockBalanceHeat
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('raw_material__material_code', 'total_available_quantity_kg', 'raw_material__material_type').first()
+            
+            if stock_balance_heat:
+                return Response({
+                    'material_code': stock_balance_heat.raw_material.material_code,
+                    'available_quantity': float(stock_balance_heat.total_available_quantity_kg),
+                    'material_type': stock_balance_heat.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # Fallback to RMStockBalance
+            stock_balance = RMStockBalance.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('raw_material__material_code', 'available_quantity', 'raw_material__material_type').first()
+            
+            if stock_balance:
+                return Response({
+                    'material_code': stock_balance.raw_material.material_code,
+                    'available_quantity': float(stock_balance.available_quantity),
+                    'material_type': stock_balance.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # If no stock balance found, try to get material info and return 0 stock
+            raw_material = RawMaterial.objects.only('material_code', 'material_type').get(id=material_id)
+            return Response({
+                'material_code': raw_material.material_code,
+                'available_quantity': 0.0,
+                'material_type': raw_material.material_type
+            }, status=status.HTTP_200_OK)
+            
+        except RawMaterial.DoesNotExist:
+            return Response(
+                {'error': 'Raw material not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch stock balance: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['get'], url_path='by-product/(?P<product_id>[^/.]+)', permission_classes=[IsAuthenticated])
+    def by_product(self, request, product_id=None):
+        """
+        Get stock balance for a material by product_code_id
+        Resolves product_code -> material -> stock balance
+        Returns only available_quantity and material_type (optimized endpoint)
+        """
+        try:
+            from products.models import Product
+            from inventory.models import RMStockBalanceHeat
+            
+            # Get product and its material
+            product = Product.objects.select_related('material').only('id', 'material_id', 'material__id').get(id=product_id)
+            material_id = product.material_id
+            
+            if not material_id:
+                return Response(
+                    {'error': 'Product does not have an associated material'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Try to get from RMStockBalanceHeat first (more accurate)
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('total_available_quantity_kg', 'raw_material__material_type').first()
+            
+            if stock_balance_heat:
+                return Response({
+                    'available_quantity': float(stock_balance_heat.total_available_quantity_kg),
+                    'material_type': stock_balance_heat.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+            
+            # Fallback to RMStockBalance
+            stock_balance = RMStockBalance.objects.filter(
+                raw_material_id=material_id
+            ).select_related('raw_material').only('available_quantity', 'raw_material__material_type').first()
+            
+            if stock_balance:
+                return Response({
+                    'available_quantity': float(stock_balance.available_quantity),
+                    'material_type': stock_balance.raw_material.material_type
+                }, status=status.HTTP_200_OK)
+
+            # If no stock balance exists, get material type and return 0
+            raw_material = RawMaterial.objects.only('material_type').get(id=material_id)
+            return Response({
+                'available_quantity': 0.0,
+                'material_type': raw_material.material_type
+            }, status=status.HTTP_200_OK)
+
+        except Product.DoesNotExist:
+            return Response(
+                {'error': 'Product not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except RawMaterial.DoesNotExist:
+            return Response(
+                {'error': 'Raw material not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to fetch stock balance: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class RawMaterialViewSet(viewsets.ModelViewSet):
@@ -427,6 +557,12 @@ class GRMReceiptViewSet(viewsets.ModelViewSet):
         # When PO is completed, update related MO to clear RM pending status
         if po.related_mo:
             mo = po.related_mo
+            # If RM was pending from PO, update rm_required_kg to include pending PO quantity
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                # Update rm_required_kg to include the pending PO quantity
+                mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
+                logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
+            
             mo.rm_pending_from_po = False
             mo.pending_po_quantity_kg = None
             mo.save()
@@ -911,3 +1047,177 @@ class RMReturnViewSet(viewsets.ModelViewSet):
             'data': serializer.data,
             'count': returns.count()
         }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_material_heat_numbers_coils(request):
+    """
+    Get all heat numbers and coils for a given material code
+    
+    Query Parameters:
+    - material_code (required): The material code to query
+    
+    Returns:
+    - material_code: The material code
+    - material_name: The material name
+    - heat_numbers: List of heat numbers with their coils
+        - id: Heat number ID
+        - heat_number: Heat number string
+        - grm_number: GRM receipt number
+        - total_weight_kg: Total weight in kg
+        - coils_received: Number of coils received
+        - available_quantity_kg: Available quantity in kg
+        - coils: List of coils with number and weight
+    """
+    material_code = request.query_params.get('material_code')
+    
+    if not material_code:
+        return Response({
+            'error': 'material_code query parameter is required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        raw_material = RawMaterial.objects.get(material_code=material_code)
+    except RawMaterial.DoesNotExist:
+        return Response({
+            'error': f'Material code "{material_code}" does not exist'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Get all heat numbers for this material
+    heat_numbers = HeatNumber.objects.filter(
+        raw_material=raw_material,
+        is_available=True
+    ).select_related('grm_receipt').order_by('-created_at')
+    
+    # Serialize the response
+    serializer = MaterialHeatNumbersResponseSerializer({
+        'material_code': raw_material.material_code,
+        'material_name': raw_material.material_name,
+        'heat_numbers': heat_numbers
+    })
+    
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsRMStoreUser])
+def delete_coils_by_heat_numbers(request):
+    """
+    Delete all coils from specified heat numbers for a material code
+    
+    Request Body:
+    {
+        "material_code": "MAT-001",
+        "heat_numbers": ["HEAT-001", "HEAT-002"]
+    }
+    
+    This will:
+    1. Find all heat numbers matching the material_code and heat_numbers list
+    2. Delete all coils (clear the items JSONField) from those heat numbers
+    3. Update coils_received to 0
+    4. Update total_weight_kg to 0
+    5. Update RM stock balance
+    6. Mark heat numbers as unavailable (is_available=False)
+    
+    Returns:
+    - message: Success message
+    - material_code: The material code
+    - deleted_heat_numbers: List of heat numbers that had coils deleted
+    - deleted_coils_count: Total number of coils deleted
+    - updated_heat_numbers: List of heat numbers that were updated
+    """
+    serializer = DeleteCoilsRequestSerializer(data=request.data)
+    
+    if not serializer.is_valid():
+        return Response({
+            'error': 'Invalid request data',
+            'details': serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    material_code = serializer.validated_data['material_code']
+    heat_number_list = serializer.validated_data['heat_numbers']
+    
+    try:
+        raw_material = RawMaterial.objects.get(material_code=material_code)
+    except RawMaterial.DoesNotExist:
+        return Response({
+            'error': f'Material code "{material_code}" does not exist'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    # Find heat numbers matching the criteria
+    heat_numbers = HeatNumber.objects.filter(
+        raw_material=raw_material,
+        heat_number__in=heat_number_list,
+        is_available=True
+    )
+    
+    if not heat_numbers.exists():
+        return Response({
+            'error': f'No active heat numbers found for material "{material_code}" with the provided heat numbers'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    deleted_heat_numbers = []
+    deleted_coils_count = 0
+    updated_heat_numbers = []
+    
+    with transaction.atomic():
+        for heat in heat_numbers:
+            # Count coils before deletion
+            coils_before = len(heat.items) if heat.items else 0
+            deleted_coils_count += coils_before
+            
+            # Clear coils (items JSONField)
+            heat.items = []
+            heat.coils_received = 0
+            heat.total_weight_kg = Decimal('0')
+            heat.is_available = False
+            heat.save()
+            
+            deleted_heat_numbers.append(heat.heat_number)
+            updated_heat_numbers.append(heat.heat_number)
+        
+        # Update stock balance for the raw material (both RMStockBalanceHeat and RMStockBalance)
+        try:
+            stock_balance_heat = RMStockBalanceHeat.objects.get(raw_material=raw_material)
+            stock_balance_heat.update_from_heat_numbers()
+        except RMStockBalanceHeat.DoesNotExist:
+            # If stock balance doesn't exist, create it
+            RMStockBalanceHeat.objects.create(raw_material=raw_material)
+        
+        # Also update the simple RMStockBalance if it exists
+        try:
+            stock_balance = RMStockBalance.objects.get(raw_material=raw_material)
+            # Calculate total available quantity from heat numbers
+            total_available = sum(
+                heat.get_available_quantity_kg() 
+                for heat in HeatNumber.objects.filter(
+                    raw_material=raw_material,
+                    is_available=True
+                )
+            )
+            stock_balance.available_quantity = total_available
+            stock_balance.save()
+        except RMStockBalance.DoesNotExist:
+            # Create RMStockBalance if it doesn't exist
+            total_available = sum(
+                heat.get_available_quantity_kg() 
+                for heat in HeatNumber.objects.filter(
+                    raw_material=raw_material,
+                    is_available=True
+                )
+            )
+            RMStockBalance.objects.create(
+                raw_material=raw_material,
+                available_quantity=total_available
+            )
+    
+    response_serializer = DeleteCoilsResponseSerializer({
+        'message': f'Successfully deleted {deleted_coils_count} coils from {len(deleted_heat_numbers)} heat number(s)',
+        'material_code': material_code,
+        'deleted_heat_numbers': deleted_heat_numbers,
+        'deleted_coils_count': deleted_coils_count,
+        'updated_heat_numbers': updated_heat_numbers
+    })
+    
+    return Response(response_serializer.data, status=status.HTTP_200_OK)

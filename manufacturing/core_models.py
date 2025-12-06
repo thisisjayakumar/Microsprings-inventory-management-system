@@ -119,6 +119,38 @@ class ManufacturingOrder(models.Model):
         help_text="When additional RM was last approved"
     )
     
+    # Additional RM Added by Production Head (no approval needed)
+    additional_rm_added_by_ph_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        default=Decimal('0'),
+        help_text="Additional RM added by Production Head (in kg or strips)"
+    )
+    
+    additional_rm_added_by_ph_strips = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        default=0,
+        help_text="Additional RM added by Production Head (in strips, for sheet materials)"
+    )
+    
+    last_additional_rm_added_by_ph_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When additional RM was last added by Production Head"
+    )
+    
+    additional_rm_added_by_ph_user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ph_added_additional_rm_mos',
+        help_text="Production Head who added the additional RM"
+    )
+    
     rm_completion_status = models.CharField(
         max_length=20,
         choices=[
@@ -417,11 +449,12 @@ class ManufacturingOrder(models.Model):
     @property
     def total_rm_limit_kg(self):
         """
-        Calculate total RM limit (original allocation + approved additional RM)
+        Calculate total RM limit (original allocation + approved additional RM + PH added RM)
         """
         base_limit = self.rm_required_kg or Decimal('0')
-        additional = self.additional_rm_approved_kg or Decimal('0')
-        return base_limit + additional
+        additional_approved = self.additional_rm_approved_kg or Decimal('0')
+        additional_ph = self.additional_rm_added_by_ph_kg or Decimal('0')
+        return base_limit + additional_approved + additional_ph
     
     @property
     def total_rm_released_kg(self):
@@ -457,6 +490,7 @@ class ManufacturingOrder(models.Model):
         - RM must not exceed total limit (original + approved additional)
         - MO must be in active status (on_hold or in_progress)
         - RM completion status must be 'active'
+        - If RM is pending from PO, check if PO is completed
         """
         if self.rm_completion_status != 'active':
             return False
@@ -464,8 +498,37 @@ class ManufacturingOrder(models.Model):
         if self.status not in ['on_hold', 'in_progress']:
             return False
         
+        # If RM is pending from PO, check if PO is completed
+        if self.rm_pending_from_po:
+            # Check if related PO is completed
+            related_pos = self.related_purchase_orders.filter(status='rm_completed')
+            if not related_pos.exists():
+                # PO not completed - only allow batch creation up to allocated RM (excluding pending PO quantity)
+                allocated_rm_kg = self.rm_required_kg - (self.pending_po_quantity_kg or Decimal('0'))
+                return self.total_rm_released_kg < allocated_rm_kg
+        
         # Can create batch if we haven't exceeded total limit
         return self.total_rm_released_kg < self.total_rm_limit_kg
+    
+    @property
+    def available_rm_for_batch_kg(self):
+        """
+        Get available RM quantity that can be released for batch creation
+        - If RM is pending from PO and PO is not completed, return allocated RM (excluding pending PO quantity)
+        - Otherwise, return total limit minus released RM
+        """
+        if self.rm_pending_from_po:
+            # Check if related PO is completed
+            related_pos = self.related_purchase_orders.filter(status='rm_completed')
+            if not related_pos.exists():
+                # PO not completed - only available RM is allocated RM (excluding pending PO quantity)
+                allocated_rm_kg = self.rm_required_kg - (self.pending_po_quantity_kg or Decimal('0'))
+                available = allocated_rm_kg - self.total_rm_released_kg
+                return max(Decimal('0'), available)
+        
+        # PO completed or no pending PO - return total limit minus released RM
+        available = self.total_rm_limit_kg - self.total_rm_released_kg
+        return max(Decimal('0'), available)
     
     @property
     def should_show_request_additional_rm(self):
@@ -509,17 +572,41 @@ class ManufacturingOrder(models.Model):
         """
         Get comprehensive RM summary for this MO
         """
+        # Calculate available RM for batch (considering PO pending status)
+        available_rm_for_batch = float(self.available_rm_for_batch_kg)
+        
+        # Get related PO information
+        related_pos_info = []
+        if self.rm_pending_from_po:
+            related_pos = self.related_purchase_orders.all()
+            for po in related_pos:
+                related_pos_info.append({
+                    'po_id': po.po_id,
+                    'status': po.status,
+                    'status_display': po.get_status_display(),
+                    'quantity_ordered': float(po.quantity_ordered) if po.quantity_ordered else None,
+                    'quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                })
+        
         return {
             'allocated_rm_kg': float(self.rm_required_kg or 0),
             'additional_approved_kg': float(self.additional_rm_approved_kg or 0),
+            'additional_rm_added_by_ph_kg': float(self.additional_rm_added_by_ph_kg or 0),
+            'additional_rm_added_by_ph_strips': self.additional_rm_added_by_ph_strips or 0,
+            'last_additional_rm_added_by_ph_at': self.last_additional_rm_added_by_ph_at.isoformat() if self.last_additional_rm_added_by_ph_at else None,
+            'additional_rm_added_by_ph_user': self.additional_rm_added_by_ph_user.get_full_name() if self.additional_rm_added_by_ph_user else None,
             'total_limit_kg': float(self.total_rm_limit_kg),
             'total_released_kg': float(self.total_rm_released_kg),
             'remaining_capacity_kg': float(self.remaining_rm_capacity_kg),
+            'available_rm_for_batch_kg': available_rm_for_batch,
             'is_limit_exceeded': self.is_rm_limit_exceeded,
             'can_create_batch': self.can_create_batch,
             'should_show_request_additional_rm': self.should_show_request_additional_rm,
             'should_show_mark_complete': self.should_show_mark_complete,
             'rm_completion_status': self.rm_completion_status,
+            'rm_pending_from_po': self.rm_pending_from_po,
+            'pending_po_quantity_kg': float(self.pending_po_quantity_kg) if self.pending_po_quantity_kg else None,
+            'related_purchase_orders': related_pos_info,
         }
 
 

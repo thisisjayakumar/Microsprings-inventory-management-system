@@ -99,6 +99,39 @@ class ManufacturingOrder(models.Model):
         null=True, blank=True,
         help_text="When additional RM was last approved"
     )
+    
+    # Additional RM Added by Production Head (no approval needed)
+    additional_rm_added_by_ph_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        default=Decimal('0'),
+        help_text="Additional RM added by Production Head (in kg or strips)"
+    )
+    
+    additional_rm_added_by_ph_strips = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        default=0,
+        help_text="Additional RM added by Production Head (in strips, for sheet materials)"
+    )
+    
+    last_additional_rm_added_by_ph_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When additional RM was last added by Production Head"
+    )
+    
+    additional_rm_added_by_ph_user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ph_added_additional_rm_mos',
+        help_text="Production Head who added the additional RM"
+    )
+    
     rm_completion_status = models.CharField(
         max_length=20,
         choices=[
@@ -362,10 +395,11 @@ class ManufacturingOrder(models.Model):
     # Additional RM Request Properties
     @property
     def total_rm_limit_kg(self):
-        """Calculate total RM limit (original allocation + approved additional RM)"""
+        """Calculate total RM limit (original allocation + approved additional RM + PH added RM)"""
         base_limit = self.rm_required_kg or Decimal('0')
-        additional = self.additional_rm_approved_kg or Decimal('0')
-        return base_limit + additional
+        additional_approved = self.additional_rm_approved_kg or Decimal('0')
+        additional_ph = self.additional_rm_added_by_ph_kg or Decimal('0')
+        return base_limit + additional_approved + additional_ph
     
     @property
     def total_rm_released_kg(self):
@@ -424,6 +458,10 @@ class ManufacturingOrder(models.Model):
         return {
             'allocated_rm_kg': float(self.rm_required_kg or 0),
             'additional_approved_kg': float(self.additional_rm_approved_kg or 0),
+            'additional_rm_added_by_ph_kg': float(self.additional_rm_added_by_ph_kg or 0),
+            'additional_rm_added_by_ph_strips': self.additional_rm_added_by_ph_strips or 0,
+            'last_additional_rm_added_by_ph_at': self.last_additional_rm_added_by_ph_at.isoformat() if self.last_additional_rm_added_by_ph_at else None,
+            'additional_rm_added_by_ph_user': self.additional_rm_added_by_ph_user.get_full_name() if self.additional_rm_added_by_ph_user else None,
             'total_limit_kg': float(self.total_rm_limit_kg),
             'total_released_kg': float(self.total_rm_released_kg),
             'remaining_capacity_kg': float(self.remaining_rm_capacity_kg),
