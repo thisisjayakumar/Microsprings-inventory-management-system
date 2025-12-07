@@ -1,0 +1,4 @@
+S.No,Product_Code,Product_Type,Spring_Type,Material_Code,Cust_ID,IPC_Code,gram/product,Sheet_Length_L,Sheet_Breadth_B,Strip_Length_L,Strip_Breadth_B,Strip_Count,Pcs_per_Strip,Pcs_per_Sheet,Coiling/Forming,Stress_Relieving,Coating,Grinding,Plating,Blackening,Process 1,Process 2,Process 3,Process 4,Process 5,Process 6,Process 7
+1,SPRING-EXAMPLE-001,Spring,TENSION SPRING,Coil-ST Spring Steel-DH-1.80mm,C_001,IPC-001,8.000,,,,,,,,Coiling,Stress_Relieving,,,Olive_Green,,
+2,STAMP-EXAMPLE-001,Press Component,,Sheet-SS Stainless Steel-304-1.50mm,C_003,IPC-002,21.000,2500,1250,560,50,110,13,1430,,,,,,Piercing & Parting,Deburring,Ironing,1.6mm Pirecing,Champering,Bending,
+
