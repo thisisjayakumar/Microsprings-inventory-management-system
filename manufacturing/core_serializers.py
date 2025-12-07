@@ -838,6 +838,69 @@ class MOProcessExecutionMinimalSerializer(serializers.ModelSerializer):
         return _get_batch_counts_for_process(obj)
 
 
+class MOProcessExecutionStartResponseSerializer(serializers.ModelSerializer):
+    """Ultra-minimal serializer for start_process response - only essential fields"""
+    process_name = serializers.CharField(source='process.name', read_only=True)
+    batches_allocated = serializers.SerializerMethodField()
+    has_batches = serializers.SerializerMethodField()
+    all_rm_allocated = serializers.SerializerMethodField()
+    can_complete_process = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = MOProcessExecution
+        fields = ['id', 'process_name', 'status', 'batches_allocated', 'has_batches', 'all_rm_allocated', 'can_complete_process']
+        read_only_fields = ['id', 'process_name', 'status', 'batches_allocated', 'has_batches', 'all_rm_allocated', 'can_complete_process']
+    
+    def get_batches_allocated(self, obj):
+        """Get batches allocated to this process for this MO"""
+        mo = obj.mo
+        batches = mo.batches.exclude(status='cancelled')
+        if batches.exists():
+            return [
+                {
+                    'id': batch.id,
+                    'batch_id': batch.batch_id,
+                    'status': batch.status,
+                    'planned_quantity': float(batch.planned_quantity) if batch.planned_quantity else 0,
+                }
+                for batch in batches
+            ]
+        return []
+    
+    def get_has_batches(self, obj):
+        """Check if there are any batches allocated"""
+        mo = obj.mo
+        return mo.batches.exclude(status='cancelled').exists()
+    
+    def get_all_rm_allocated(self, obj):
+        """Check if all RM required for MO is allocated through batches"""
+        mo = obj.mo
+        # If no batches exist, RM is not allocated
+        if not mo.batches.exclude(status='cancelled').exists():
+            return False
+        
+        # Check if all RM is allocated (can't create more batches)
+        # This means total_rm_released_kg >= total_rm_limit_kg
+        return not mo.can_create_batch
+    
+    def get_can_complete_process(self, obj):
+        """
+        Check if process can be completed
+        Can complete if:
+        1. No batches allocated (no RM allocated yet), OR
+        2. All batches allocated (all RM is allocated through batches)
+        """
+        mo = obj.mo
+        has_batches = mo.batches.exclude(status='cancelled').exists()
+        
+        # If no batches, can complete (no RM allocated)
+        if not has_batches:
+            return True
+        
+        # If batches exist, can only complete if all RM is allocated
+        return not mo.can_create_batch
+
+
 class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
     """Highly optimized MO serializer for production-head MO detail page - only essential fields"""
     product_code_display = serializers.CharField(source='product_code.product_code', read_only=True)
@@ -846,6 +909,7 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
     shift_display = serializers.CharField(source='get_shift_display', read_only=True)
     process_executions = MOProcessExecutionMinimalSerializer(many=True, read_only=True)
     overall_progress = serializers.SerializerMethodField()
+    can_create_batch = serializers.ReadOnlyField()
 
     class Meta:
         model = ManufacturingOrder
@@ -857,9 +921,9 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
             'id', 'mo_id', 'product_code_display', 'quantity', 'material_name', 'grade',
             'shift', 'shift_display', 'status', 'status_display', 'priority', 'priority_display',
             'delivery_date', 'special_instructions', 'process_executions',
-            'overall_progress', 'rejected_at'
+            'overall_progress', 'rejected_at', 'can_create_batch'
         ]
-        read_only_fields = ['mo_id', 'created_at', 'updated_at']
+        read_only_fields = ['mo_id', 'created_at', 'updated_at', 'can_create_batch']
     
     def get_overall_progress(self, obj):
         """Calculate overall progress across all processes"""

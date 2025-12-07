@@ -3,7 +3,8 @@ from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html
 from .models import (
     CustomUser, UserProfile, Role, UserRole, 
-    ProcessSupervisor, OperatorEngagement, LoginSession
+    ProcessSupervisor, OperatorEngagement, LoginSession,
+    BreakType, SupervisorBreak
 )
 
 
@@ -192,6 +193,42 @@ class LoginSessionAdmin(admin.ModelAdmin):
     
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user')
+
+
+@admin.register(BreakType)
+class BreakTypeAdmin(admin.ModelAdmin):
+    list_display = ['name', 'description', 'is_active', 'created_at']
+    list_filter = ['is_active', 'created_at']
+    search_fields = ['name', 'description']
+    readonly_fields = ['created_at', 'updated_at']
+    
+    def get_queryset(self, request):
+        return super().get_queryset(request)
+
+
+@admin.register(SupervisorBreak)
+class SupervisorBreakAdmin(admin.ModelAdmin):
+    list_display = ['login_session', 'break_type', 'break_start_time', 'break_end_time', 'get_duration', 'is_active']
+    list_filter = ['break_type', 'break_start_time', 'break_end_time']
+    search_fields = ['login_session__user__email', 'login_session__user__first_name', 'login_session__user__last_name']
+    readonly_fields = ['created_at']
+    date_hierarchy = 'break_start_time'
+    
+    def get_duration(self, obj):
+        if obj.break_end_time:
+            duration = obj.break_end_time - obj.break_start_time
+            minutes = int(duration.total_seconds() / 60)
+            return f"{minutes} minutes"
+        return "Active"
+    get_duration.short_description = 'Duration'
+    
+    def is_active(self, obj):
+        return obj.break_end_time is None
+    is_active.boolean = True
+    is_active.short_description = 'Active'
+    
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('login_session', 'login_session__user', 'break_type')
 
 
 # Customize admin site

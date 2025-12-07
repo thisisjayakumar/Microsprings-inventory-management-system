@@ -54,7 +54,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
     permission_classes = [IsManagerOrSupervisor]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'priority', 'shift', 'material_type']
-    search_fields = ['mo_id', 'product_code__product_code', 'product_code__display_name', 'product_code__material__material_name']
+    search_fields = ['mo_id', 'product_code__product_code', 'product_code__internal_product_code', 'product_code__material__material_name']
     ordering_fields = ['created_at', 'planned_start_date', 'delivery_date', 'mo_id']
     ordering = ['-created_at']
     pagination_class = pagination.LimitOffsetPagination
@@ -2103,32 +2103,9 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
         if any(role in ['admin', 'manager', 'production_head'] for role in user_roles):
             return queryset
         
-        # Supervisors can only see processes assigned to them or their department
+        # Updated requirement: ANY supervisor can see ALL processes (no filtering)
         if 'supervisor' in user_roles:
-            try:
-                user_profile = user.userprofile
-                from authentication.models import ProcessSupervisor
-                
-                # Get processes this supervisor can handle
-                process_supervisor = ProcessSupervisor.objects.filter(
-                    supervisor=user,
-                    department=user_profile.department,
-                    is_active=True
-                ).first()
-                
-                if process_supervisor:
-                    # Filter to only show processes this supervisor handles
-                    queryset = queryset.filter(
-                        Q(assigned_supervisor=user) | 
-                        Q(process__name__in=process_supervisor.process_names)
-                    )
-                else:
-                    # If no process supervisor record, only show assigned processes
-                    queryset = queryset.filter(assigned_supervisor=user)
-                    
-            except Exception as e:
-                # If there's an error, only show assigned processes
-                queryset = queryset.filter(assigned_supervisor=user)
+            return queryset  # Supervisors can see all processes
         
         # RM Store and FG Store users can only see processes assigned to them
         elif any(role in ['rm_store', 'fg_store'] for role in user_roles):
@@ -2213,8 +2190,39 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def start_process(self, request, pk=None):
-        """Start a process execution"""
-        execution = self.get_object()
+        """Start a process execution - optimized for fast response"""
+        import threading
+        
+        # Get object directly without queryset filtering to avoid 404 issues
+        # We'll check permissions separately using can_user_access
+        try:
+            execution = MOProcessExecution.objects.select_related(
+                'mo', 'process', 'assigned_operator', 'assigned_supervisor'
+            ).get(pk=pk)
+        except MOProcessExecution.DoesNotExist:
+            return Response(
+                {'error': 'Process execution not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if user can access this process
+        # Updated requirement: ANY supervisor can handle ANY process
+        # No more ProcessSupervisor restrictions - supervisors have full access to all processes
+        user_roles = list(request.user.user_roles.filter(is_active=True).values_list('role__name', flat=True))
+        has_permission = False
+        
+        # Admin, manager, production_head can always start
+        if any(role in ['admin', 'manager', 'production_head'] for role in user_roles):
+            has_permission = True
+        # ANY supervisor can start ANY process (no restrictions)
+        elif 'supervisor' in user_roles:
+            has_permission = True
+        
+        if not has_permission:
+            return Response(
+                {'error': 'Only supervisors, managers, production heads, or admins can start processes'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         if execution.status != 'pending':
             return Response(
@@ -2222,40 +2230,46 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Check if user can access this process
-        if not execution.can_user_access(request.user):
-            return Response(
-                {'error': 'You do not have permission to access this process'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-        
+        # Update process status immediately
         execution.status = 'in_progress'
         execution.actual_start_time = timezone.now()
         execution.assigned_operator = request.user
         execution.save()
         
-        # Create inventory transaction for process start (track location movement)
-        # Get all batches for this MO and track their movement to this process
-        mo = execution.mo
-        for batch in mo.batches.exclude(status='cancelled'):
+        # Move heavy operations to background thread
+        def background_tasks():
+            """Run heavy operations in background"""
             try:
-                InventoryTransactionManager.create_process_start_transaction(
-                    execution, batch, request.user
-                )
+                # Create inventory transaction for process start (track location movement)
+                # Get all batches for this MO and track their movement to this process
+                mo = execution.mo
+                for batch in mo.batches.exclude(status='cancelled'):
+                    try:
+                        InventoryTransactionManager.create_process_start_transaction(
+                            execution, batch, request.user
+                        )
+                    except Exception as e:
+                        print(f"Error creating process start transaction for batch {batch.batch_id}: {e}")
+                
+                # Create step executions if they don't exist
+                process_steps = execution.process.process_steps.all().order_by('sequence_order')
+                for step in process_steps:
+                    MOProcessStepExecution.objects.get_or_create(
+                        process_execution=execution,
+                        process_step=step,
+                        defaults={'status': 'pending'}
+                    )
             except Exception as e:
-                print(f"Error creating process start transaction for batch {batch.batch_id}: {e}")
+                print(f"Error in background tasks for process execution {execution.id}: {e}")
         
-        # Create step executions if they don't exist
-        process_steps = execution.process.process_steps.all().order_by('sequence_order')
-        for step in process_steps:
-            MOProcessStepExecution.objects.get_or_create(
-                process_execution=execution,
-                process_step=step,
-                defaults={'status': 'pending'}
-            )
+        # Start background thread (non-blocking)
+        thread = threading.Thread(target=background_tasks, daemon=True)
+        thread.start()
         
-        serializer = self.get_serializer(execution)
-        return Response(serializer.data)
+        # Return minimal response immediately
+        from .core_serializers import MOProcessExecutionStartResponseSerializer
+        serializer = MOProcessExecutionStartResponseSerializer(execution)
+        return Response(serializer.data, status=status.HTTP_200_OK)
     
     @action(detail=True, methods=['post'])
     def complete_process(self, request, pk=None):
@@ -2271,11 +2285,34 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
             )
         
         # Check if user can access this process
-        if not execution.can_user_access(request.user):
+        # Updated requirement: ANY supervisor can handle ANY process
+        user_roles = list(request.user.user_roles.filter(is_active=True).values_list('role__name', flat=True))
+        has_permission = any(role in ['admin', 'manager', 'production_head', 'supervisor'] for role in user_roles)
+        
+        if not has_permission:
             return Response(
-                {'error': 'You do not have permission to access this process'}, 
+                {'error': 'Only supervisors, managers, production heads, or admins can complete processes'}, 
                 status=status.HTTP_403_FORBIDDEN
             )
+        
+        # NEW REQUIREMENT: Check if all RM is allocated before allowing process completion
+        # Can complete process ONLY if:
+        # 1. No batches allocated (no RM allocated yet), OR
+        # 2. All batches allocated (all RM is allocated - can't create more batches)
+        mo = execution.mo
+        mo_batches = mo.batches.exclude(status='cancelled')
+        
+        # If batches exist, check if all RM is allocated
+        if mo_batches.exists():
+            # If can_create_batch is True, RM is not fully allocated, so cannot complete
+            if mo.can_create_batch:
+                return Response(
+                    {
+                        'error': 'Cannot complete process - all RM must be allocated through batches first',
+                        'message': 'All batches must be created (all RM allocated) before completing the process. Please create all required batches first.'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         # Complete the process and move to next
         result = execution.complete_and_move_to_next(request.user)
@@ -2407,11 +2444,18 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
         """Complete a process execution"""
         execution = self.get_object()
         
-        # Check if user has permission (supervisor or operator assigned to this process)
-        user_roles = request.user.user_roles.values_list('role__name', flat=True)
-        if 'supervisor' not in user_roles and execution.assigned_operator != request.user:
+        # Check if user has permission
+        # Updated requirement: ANY supervisor can handle ANY process
+        user_roles = list(request.user.user_roles.filter(is_active=True).values_list('role__name', flat=True))
+        has_permission = any(role in ['admin', 'manager', 'production_head', 'supervisor'] for role in user_roles)
+        
+        # Also allow assigned operators to complete
+        if not has_permission and execution.assigned_operator == request.user:
+            has_permission = True
+        
+        if not has_permission:
             return Response(
-                {'error': 'Only supervisors or assigned operators can complete processes'}, 
+                {'error': 'Only supervisors, managers, production heads, admins, or assigned operators can complete processes'}, 
                 status=status.HTTP_403_FORBIDDEN
             )
         
@@ -2427,11 +2471,25 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # For batch-based production, check if all batches have completed this process
+        # NEW REQUIREMENT: Check if all RM is allocated before allowing process completion
+        # Can complete process ONLY if:
+        # 1. No batches allocated (no RM allocated yet), OR
+        # 2. All batches allocated (all RM is allocated - can't create more batches)
         mo = execution.mo
         mo_batches = mo.batches.exclude(status='cancelled')
         
+        # If batches exist, check if all RM is allocated
         if mo_batches.exists():
+            # If can_create_batch is True, RM is not fully allocated, so cannot complete
+            if mo.can_create_batch:
+                return Response(
+                    {
+                        'error': 'Cannot complete process - all RM must be allocated through batches first',
+                        'message': 'All batches must be created (all RM allocated) before completing the process. Please create all required batches first.'
+                    }, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
             # For batch-based production, batch completion is what matters, not step completion
             # Check if all batches have completed this process
             all_batches_completed_process = True
