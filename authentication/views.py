@@ -17,7 +17,8 @@ from django.conf import settings
 
 from .models import (
     CustomUser, UserProfile, Role, UserRole, 
-    ProcessSupervisor, OperatorEngagement, LoginSession
+    ProcessSupervisor, OperatorEngagement, LoginSession,
+    BreakType, SupervisorBreak
 )
 from .serializers import (
     UserRegistrationSerializer, UserLoginSerializer, UserDetailSerializer,
@@ -43,6 +44,37 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         user = serializer.validated_data['user']
         client_ip = serializer.validated_data['client_ip']
         user_agent = serializer.validated_data['user_agent']
+        
+        # Check if user has an active break (resuming after break)
+        # If they logged out for a break and are logging back in, end the break
+        last_break_session = LoginSession.objects.filter(
+            user=user,
+            logout_reason='break',
+            is_final_logout=False
+        ).order_by('-logout_time').first()
+        
+        if last_break_session:
+            # Check if there's an active break
+            active_break = SupervisorBreak.objects.filter(
+                login_session=last_break_session,
+                break_end_time__isnull=True
+            ).first()
+            
+            if active_break:
+                # End the break
+                active_break.break_end_time = timezone.now()
+                active_break.save()
+                
+                # Calculate break duration
+                break_duration = (active_break.break_end_time - active_break.break_start_time).total_seconds() / 3600
+                
+                # If break was longer than 4-5 hours, mark as non-productive
+                # We'll track this in the session for reporting
+                if break_duration > 4:
+                    logger.warning(
+                        f"Supervisor {user.get_full_name()} had a break longer than 4 hours "
+                        f"({break_duration:.2f} hours). This will be marked as non-productive time."
+                    )
         
         # Create login session
         LoginSession.objects.create(
@@ -217,11 +249,12 @@ def _reassign_supervisor_work(supervisor_user):
                     )
                 else:
                     # Backup supervisor is also logged out, set to None
+                    backup_supervisor_name = backup_supervisor.get_full_name()
                     execution.assigned_supervisor = None
                     execution.save(update_fields=['assigned_supervisor', 'updated_at'])
                     
                     logger.warning(
-                        f"Backup supervisor {backup_supervisor.get_full_name()} is not logged in. "
+                        f"Backup supervisor {backup_supervisor_name} is not logged in. "
                         f"Setting {execution.mo.mo_id} - {execution.process.name} supervisor to None"
                     )
                     
@@ -230,6 +263,7 @@ def _reassign_supervisor_work(supervisor_user):
                         'process': execution.process.name,
                         'old_supervisor': old_supervisor,
                         'new_supervisor': 'None',
+                        'backup_supervisor_name': backup_supervisor_name,
                         'status': 'unassigned_backup_unavailable'
                     })
                     
@@ -254,6 +288,7 @@ def _reassign_supervisor_work(supervisor_user):
                     'process': execution.process.name,
                     'old_supervisor': old_supervisor,
                     'new_supervisor': 'None',
+                    'backup_supervisor_name': None,
                     'status': 'unassigned_no_backup'
                 })
                 
@@ -458,13 +493,38 @@ def _notify_production_head_unassigned_process(execution, logged_out_supervisor)
 @permission_classes([IsAuthenticated])
 def logout_user(request):
     """
-    Enhanced logout with session tracking and supervisor work reassignment
+    Enhanced logout with session tracking, break tracking, and supervisor work reassignment
     """
     import logging
     logger = logging.getLogger(__name__)
     
     try:
         refresh_token = request.data.get('refresh')
+        logout_reason = request.data.get('logout_reason')  # 'break' or 'end_of_day'
+        break_type_id = request.data.get('break_type_id')  # Required if logout_reason is 'break'
+        
+        # Validate logout reason
+        if logout_reason not in ['break', 'end_of_day']:
+            return Response(
+                {'error': 'Invalid logout_reason. Must be "break" or "end_of_day"'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # If break, validate break_type_id
+        break_type = None
+        if logout_reason == 'break':
+            if not break_type_id:
+                return Response(
+                    {'error': 'break_type_id is required when logout_reason is "break"'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            try:
+                break_type = BreakType.objects.get(id=break_type_id, is_active=True)
+            except BreakType.DoesNotExist:
+                return Response(
+                    {'error': f'Break type with id {break_type_id} not found or inactive'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         # Check if user has supervisor role
         is_supervisor = request.user.user_roles.filter(
@@ -474,22 +534,60 @@ def logout_user(request):
         
         reassignment_summary = []
         
-        # If supervisor is logging out, reassign their work
-        if is_supervisor:
+        # Get active login session
+        active_session = LoginSession.objects.filter(
+            user=request.user,
+            is_active=True
+        ).first()
+        
+        current_time = timezone.now()
+        
+        # If supervisor is logging out, reassign their work (only for end_of_day)
+        if is_supervisor and logout_reason == 'end_of_day':
             try:
                 reassignment_summary = _reassign_supervisor_work(request.user)
             except Exception as e:
                 logger.error(f"Error reassigning supervisor work during logout: {str(e)}", exc_info=True)
                 # Continue with logout even if reassignment fails
         
-        # Update login session
-        LoginSession.objects.filter(
-            user=request.user,
-            is_active=True
-        ).update(
-            logout_time=timezone.now(),
-            is_active=False
-        )
+        # Handle break or final logout
+        if logout_reason == 'break':
+            # Create break record
+            if active_session:
+                SupervisorBreak.objects.create(
+                    login_session=active_session,
+                    break_type=break_type,
+                    break_start_time=current_time
+                )
+                logger.info(
+                    f"Supervisor {request.user.get_full_name()} started {break_type.name} break"
+                )
+            
+            # Mark session as inactive but don't set logout_time yet
+            if active_session:
+                active_session.is_active = False
+                active_session.logout_reason = 'break'
+                active_session.break_type = break_type
+                active_session.save()
+        else:
+            # End of day - final logout
+            # End any active breaks first
+            if active_session:
+                active_breaks = SupervisorBreak.objects.filter(
+                    login_session=active_session,
+                    break_end_time__isnull=True
+                )
+                for break_obj in active_breaks:
+                    break_obj.break_end_time = current_time
+                    break_obj.save()
+            
+            # Update login session
+            if active_session:
+                active_session.logout_time = current_time
+                active_session.logout_reason = 'end_of_day'
+                active_session.is_active = False
+                active_session.is_final_logout = True
+                active_session.save()
         
         # Blacklist token if provided
         if refresh_token:
@@ -498,13 +596,83 @@ def logout_user(request):
         
         response_data = {
             'message': 'Successfully logged out',
-            'reassignment_summary': reassignment_summary if is_supervisor else None
+            'logout_reason': logout_reason,
+            'reassignment_summary': reassignment_summary if (is_supervisor and logout_reason == 'end_of_day') else None
         }
         
         return Response(response_data, status=status.HTTP_200_OK)
     except Exception as e:
         logger.error(f"Logout error: {str(e)}", exc_info=True)
         return Response({'error': 'Invalid token'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_break_types(request):
+    """
+    Get list of active break types for supervisor logout
+    """
+    from .models import BreakType
+    
+    break_types = BreakType.objects.filter(is_active=True).order_by('name')
+    break_types_data = [
+        {
+            'id': bt.id,
+            'name': bt.name,
+            'description': bt.description
+        }
+        for bt in break_types
+    ]
+    
+    return Response({'break_types': break_types_data}, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def resume_after_break(request):
+    """
+    Resume session after break - creates new login session
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Get the most recent inactive session with break reason
+        last_session = LoginSession.objects.filter(
+            user=request.user,
+            logout_reason='break',
+            is_final_logout=False
+        ).order_by('-logout_time').first()
+        
+        if last_session:
+            # End the break
+            active_break = SupervisorBreak.objects.filter(
+                login_session=last_session,
+                break_end_time__isnull=True
+            ).first()
+            
+            if active_break:
+                active_break.break_end_time = timezone.now()
+                active_break.save()
+        
+        # Create new login session (resume)
+        client_ip = request.META.get('REMOTE_ADDR', '')
+        user_agent = request.META.get('HTTP_USER_AGENT', '')
+        
+        new_session = LoginSession.objects.create(
+            user=request.user,
+            ip_address=client_ip,
+            user_agent=user_agent
+        )
+        
+        return Response({
+            'message': 'Session resumed after break',
+            'session_id': new_session.id
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error resuming session after break: {str(e)}", exc_info=True)
+        return Response({'error': 'Failed to resume session'}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class UserViewSet(ModelViewSet):
