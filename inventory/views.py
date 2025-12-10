@@ -356,6 +356,15 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
     ordering_fields = ['material_code', 'material_name']
     ordering = ['material_code']
     
+    def get_queryset(self):
+        """Optimize queryset by prefetching heat numbers for list/retrieve actions"""
+        queryset = super().get_queryset()
+        if self.action in ['list', 'retrieve']:
+            queryset = queryset.prefetch_related(
+                'heat_numbers__grm_receipt'
+            )
+        return queryset
+    
     def get_permissions(self):
         """Allow read for all authenticated users, but create/update/delete only for RM Store users"""
         if self.action in ['list', 'retrieve', 'dropdown']:

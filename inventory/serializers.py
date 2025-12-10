@@ -10,19 +10,53 @@ from .models import (
 )
 
 
+class HeatNumberDetailSerializer(serializers.ModelSerializer):
+    """Serializer for heat number details with coil/sheet information"""
+    grm_number = serializers.CharField(source='grm_receipt.grm_number', read_only=True)
+    coils_received = serializers.IntegerField(read_only=True)
+    sheets_received = serializers.IntegerField(read_only=True)
+    total_weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
+    available_quantity_kg = serializers.SerializerMethodField()
+    available_coils = serializers.SerializerMethodField()
+    available_sheets = serializers.SerializerMethodField()
+    items = serializers.JSONField(read_only=True)
+    
+    class Meta:
+        model = HeatNumber
+        fields = [
+            'id', 'heat_number', 'grm_number', 'coils_received', 'sheets_received',
+            'total_weight_kg', 'available_quantity_kg', 'available_coils', 'available_sheets',
+            'items', 'is_available', 'created_at'
+        ]
+        read_only_fields = fields
+    
+    def get_available_quantity_kg(self, obj):
+        """Get remaining available quantity in KG"""
+        return float(obj.get_available_quantity_kg()) if obj.total_weight_kg else 0.0
+    
+    def get_available_coils(self, obj):
+        """Get remaining available coils"""
+        return obj.get_available_coils() if obj.raw_material.material_type == 'coil' else None
+    
+    def get_available_sheets(self, obj):
+        """Get remaining available sheets"""
+        return obj.sheets_received if obj.raw_material.material_type == 'sheet' and obj.is_available else None
+
+
 class RawMaterialBasicSerializer(serializers.ModelSerializer):
     """Optimized raw material serializer - returns only fields shown in frontend"""
     material_name_display = serializers.CharField(source='material_name', read_only=True)
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     finishing_display = serializers.CharField(source='get_finishing_display', read_only=True)
     available_quantity = serializers.SerializerMethodField()
+    heat_numbers = serializers.SerializerMethodField()
     
     class Meta:
         model = RawMaterial
         fields = [
             'id', 'material_code', 'material_name_display',
             'material_type_display', 'grade', 'wire_diameter_mm',
-            'finishing_display', 'available_quantity'
+            'finishing_display', 'available_quantity', 'heat_numbers'
         ]
         read_only_fields = fields
     
@@ -32,6 +66,16 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
         if stock_balance:
             return float(stock_balance.available_quantity)
         return 0.0
+    
+    def get_heat_numbers(self, obj):
+        """Get heat numbers with coil/sheet details for this raw material"""
+        heat_numbers = obj.heat_numbers.filter(is_available=True).order_by('-created_at')
+        
+        if not heat_numbers.exists():
+            return "NIL"
+        
+        serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
+        return serializer.data
 
 
 class RawMaterialCreateSerializer(serializers.ModelSerializer):
@@ -478,10 +522,12 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
         purchase_order = data.get('purchase_order')
         heat_numbers_data = data.get('heat_numbers_data', [])
         
-        # Check if GRM already exists for this PO
-        if purchase_order and GRMReceipt.objects.filter(purchase_order=purchase_order).exists():
+        # Check if active GRM already exists for this PO (exclude cancelled)
+        if purchase_order and GRMReceipt.objects.filter(
+            purchase_order=purchase_order
+        ).exclude(status='cancelled').exists():
             raise serializers.ValidationError({
-                'purchase_order': 'GRM receipt already exists for this Purchase Order'
+                'purchase_order': 'An active GRM receipt already exists for this Purchase Order'
             })
         
         # Validate heat numbers data
