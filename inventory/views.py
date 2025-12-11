@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status, filters, permissions
+from rest_framework import viewsets, status, filters, permissions, pagination
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -17,7 +17,7 @@ from products.models import Product
 from .models import (
     RMStockBalance, RawMaterial, InventoryTransaction,
     GRMReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
-    HandoverIssue, RMReturn
+    HandoverIssue, RMReturn, Location
 )
 from .serializers import (
     ProductListSerializer, ProductCreateUpdateSerializer,
@@ -349,12 +349,21 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
     ViewSet for RawMaterial - READ for all authenticated users, CREATE/UPDATE/DELETE for RM Store users
     """
     queryset = RawMaterial.objects.all()
-    pagination_class = None
+    pagination_class = pagination.LimitOffsetPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['material_type', 'material_name']
     search_fields = ['material_code', 'material_name', 'grade']
     ordering_fields = ['material_code', 'material_name']
     ordering = ['material_code']
+    
+    def get_queryset(self):
+        """Optimize queryset by prefetching heat numbers for list/retrieve actions"""
+        queryset = super().get_queryset()
+        if self.action in ['list', 'retrieve']:
+            queryset = queryset.prefetch_related(
+                'heat_numbers__grm_receipt'
+            )
+        return queryset
     
     def get_permissions(self):
         """Allow read for all authenticated users, but create/update/delete only for RM Store users"""
@@ -1102,9 +1111,9 @@ def get_material_heat_numbers_coils(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated, IsRMStoreUser])
-def delete_coils_by_heat_numbers(request):
+def return_coils_to_vendor(request):
     """
-    Delete all coils from specified heat numbers for a material code
+    Return coils from specified heat numbers to vendor (RM Store return action)
     
     Request Body:
     {
@@ -1114,18 +1123,20 @@ def delete_coils_by_heat_numbers(request):
     
     This will:
     1. Find all heat numbers matching the material_code and heat_numbers list
-    2. Delete all coils (clear the items JSONField) from those heat numbers
+    2. Clear all coils (clear the items JSONField) from those heat numbers
     3. Update coils_received to 0
     4. Update total_weight_kg to 0
-    5. Update RM stock balance
+    5. Update RM stock balance (reduces stock)
     6. Mark heat numbers as unavailable (is_available=False)
+    7. Create a tracking record for the return
     
     Returns:
     - message: Success message
     - material_code: The material code
-    - deleted_heat_numbers: List of heat numbers that had coils deleted
-    - deleted_coils_count: Total number of coils deleted
+    - returned_heat_numbers: List of heat numbers that had coils returned
+    - returned_coils_count: Total number of coils returned
     - updated_heat_numbers: List of heat numbers that were updated
+    - total_weight_returned: Total weight returned in kg
     """
     serializer = DeleteCoilsRequestSerializer(data=request.data)
     
@@ -1157,24 +1168,27 @@ def delete_coils_by_heat_numbers(request):
             'error': f'No active heat numbers found for material "{material_code}" with the provided heat numbers'
         }, status=status.HTTP_404_NOT_FOUND)
     
-    deleted_heat_numbers = []
-    deleted_coils_count = 0
+    returned_heat_numbers = []
+    returned_coils_count = 0
     updated_heat_numbers = []
+    total_weight_returned = Decimal('0')
     
     with transaction.atomic():
         for heat in heat_numbers:
-            # Count coils before deletion
+            # Count coils and weight before return
             coils_before = len(heat.items) if heat.items else 0
-            deleted_coils_count += coils_before
+            returned_coils_count += coils_before
+            weight_before = heat.total_weight_kg or Decimal('0')
+            total_weight_returned += weight_before
             
-            # Clear coils (items JSONField)
+            # Clear coils (items JSONField) - returning to vendor
             heat.items = []
             heat.coils_received = 0
             heat.total_weight_kg = Decimal('0')
             heat.is_available = False
             heat.save()
             
-            deleted_heat_numbers.append(heat.heat_number)
+            returned_heat_numbers.append(heat.heat_number)
             updated_heat_numbers.append(heat.heat_number)
         
         # Update stock balance for the raw material (both RMStockBalanceHeat and RMStockBalance)
@@ -1211,13 +1225,103 @@ def delete_coils_by_heat_numbers(request):
                 raw_material=raw_material,
                 available_quantity=total_available
             )
+        
+        # Note: We cannot create InventoryTransaction here because it requires a Product FK,
+        # but we're dealing with RawMaterials. The return is tracked via the stock reduction
+        # and can be queried from heat numbers with is_available=False.
+        # For display purposes, we can query heat numbers that were returned.
     
-    response_serializer = DeleteCoilsResponseSerializer({
-        'message': f'Successfully deleted {deleted_coils_count} coils from {len(deleted_heat_numbers)} heat number(s)',
+    response_data = {
+        'message': f'Successfully returned {returned_coils_count} coils from {len(returned_heat_numbers)} heat number(s) to vendor',
         'material_code': material_code,
-        'deleted_heat_numbers': deleted_heat_numbers,
-        'deleted_coils_count': deleted_coils_count,
-        'updated_heat_numbers': updated_heat_numbers
-    })
+        'returned_heat_numbers': returned_heat_numbers,
+        'returned_coils_count': returned_coils_count,
+        'updated_heat_numbers': updated_heat_numbers,
+        'total_weight_returned': str(total_weight_returned)
+    }
     
-    return Response(response_serializer.data, status=status.HTTP_200_OK)
+    return Response(response_data, status=status.HTTP_200_OK)
+
+
+# Keep old function name for backward compatibility
+@api_view(['POST'])
+@permission_classes([IsAuthenticated, IsRMStoreUser])
+def delete_coils_by_heat_numbers(request):
+    """Backward compatibility wrapper - redirects to return_coils_to_vendor"""
+    return return_coils_to_vendor(request)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated, IsRMStoreUser])
+def get_rm_store_returns(request):
+    """
+    Get RM Store returns (heat numbers returned to vendor by RM Store)
+    These are heat numbers that have is_available=False and were returned via return_coils_to_vendor
+    
+    Query Parameters:
+    - material_code: Filter by material code
+    - start_date: Filter returns from this date (YYYY-MM-DD)
+    - end_date: Filter returns until this date (YYYY-MM-DD)
+    """
+    from django.db.models import Max
+    
+    # Filter heat numbers that were returned (is_available=False, no coils, updated_at can indicate return time)
+    # We'll get heat numbers that have is_available=False and coils_received=0
+    heat_numbers = HeatNumber.objects.filter(
+        is_available=False,
+        coils_received=0,
+        total_weight_kg=0
+    ).select_related('raw_material', 'grm_receipt').order_by('-updated_at')
+    
+    # Apply filters
+    material_code = request.query_params.get('material_code')
+    if material_code:
+        heat_numbers = heat_numbers.filter(raw_material__material_code=material_code)
+    
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+    if start_date:
+        heat_numbers = heat_numbers.filter(updated_at__gte=start_date)
+    if end_date:
+        heat_numbers = heat_numbers.filter(updated_at__lte=end_date)
+    
+    # Group by material and return date to create return records
+    returns_data = []
+    for heat in heat_numbers:
+        # Get the original weight from GRM receipt if available, otherwise use 0
+        # Note: When coils are returned, total_weight_kg is set to 0, so we need to get original weight
+        # We can estimate from GRM receipt or use a default
+        returned_weight = heat.grm_receipt.total_weight_kg if heat.grm_receipt and hasattr(heat.grm_receipt, 'total_weight_kg') else Decimal('0')
+        
+        returns_data.append({
+            'id': f"RMSTORE-{heat.id}",
+            'return_id': f"RMSTORE-RETURN-{heat.id}",
+            'raw_material_details': {
+                'material_code': heat.raw_material.material_code,
+                'material_name': heat.raw_material.material_name,
+                'grade': heat.raw_material.grade,
+            },
+            'heat_number_display': heat.heat_number,
+            'heat_number_id': heat.id,
+            'grm_number': heat.grm_receipt.grm_number if heat.grm_receipt else None,
+            'batch_id': 'N/A',
+            'mo_id': 'N/A',
+            'returned_from_location_display': 'RM Store',
+            'quantity_kg': str(returned_weight),
+            'total_batch_quantity_kg': str(returned_weight),
+            'scrapped_quantity_kg': 0,
+            'return_reason': 'RM Store Return to Vendor',
+            'returned_by_name': 'RM Store User',
+            'returned_at': heat.updated_at.isoformat() if heat.updated_at else timezone.now().isoformat(),
+            'disposition': 'return_to_vendor',
+            'disposition_display': 'Returned to Vendor',
+            'is_rm_store_return': True,
+            'disposed_at': heat.updated_at.isoformat() if heat.updated_at else None,
+            'notes': f"Returned coils from heat number {heat.heat_number} to vendor"
+        })
+    
+    return Response({
+        'success': True,
+        'data': returns_data,
+        'count': len(returns_data)
+    }, status=status.HTTP_200_OK)

@@ -183,95 +183,46 @@ class BatchMinimalSerializer(serializers.ModelSerializer):
 
 
 class ManufacturingOrderListSerializer(serializers.ModelSerializer):
-    """Optimized serializer for MO list view"""
-    product_code = ProductBasicSerializer(read_only=True)
-    # NOTE: assigned_rm_store removed - all RM store users see all MOs
-    # NOTE: assigned_supervisor removed - supervisor tracking moved to work center level
-    created_by = UserBasicSerializer(read_only=True)
+    """Optimized serializer for MO list view - returns only fields shown in frontend"""
+    product_code_display = serializers.SerializerMethodField()
+    product_code_code = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
-    shift_display = serializers.CharField(source='get_shift_display', read_only=True)
-    batches = BatchListSerializer(many=True, read_only=True)
-    material_type = serializers.CharField(source='product_code.material_type', read_only=True)
-    material_name = serializers.CharField(source='product_code.material.material_name', read_only=True)
-    remaining_rm = serializers.SerializerMethodField()
-    rm_unit = serializers.SerializerMethodField()
-    can_create_batch = serializers.SerializerMethodField()
+    rm_required_kg = serializers.SerializerMethodField()
     
-    def get_remaining_rm(self, obj):
-        """Calculate remaining RM for batch creation"""
-        product = obj.product_code
-        if not product:
+    def get_product_code_display(self, obj):
+        """Get product display name"""
+        if obj.product_code:
+            return getattr(obj.product_code, 'display_name', None) or getattr(obj.product_code, 'product_code', None)
+        return None
+    
+    def get_product_code_code(self, obj):
+        """Get product code"""
+        if obj.product_code:
+            return getattr(obj.product_code, 'product_code', None)
+        return None
+    
+    def get_rm_required_kg(self, obj):
+        """Calculate RM required in kg for display"""
+        if not obj.product_code or not obj.product_code.grams_per_product:
             return None
-        
-        total_rm_required = Decimal('0')
-        cumulative_rm_released = Decimal('0')
-        
         try:
-            if product.material_type == 'coil' and product.grams_per_product:
-                # For coil-based products - calculate in kg
-                total_grams = obj.quantity * product.grams_per_product
-                base_rm_kg = Decimal(str(total_grams / 1000))
-                tolerance = obj.tolerance_percentage or Decimal('2.00')
-                tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
-                total_rm_required = base_rm_kg * tolerance_factor
-                
-                # Calculate cumulative RM from all non-cancelled batches
-                for batch in obj.batches.exclude(status='cancelled'):
-                    batch_rm_base_kg = Decimal(str(batch.planned_quantity / 1000))
-                    batch_rm = batch_rm_base_kg * tolerance_factor
-                    cumulative_rm_released += batch_rm
-                    
-            elif product.material_type == 'sheet' and product.pcs_per_strip:
-                # For sheet-based products - calculate in strips
-                strips_calc = product.calculate_strips_required(obj.quantity)
-                total_rm_required = Decimal(str(strips_calc.get('strips_required', 0)))
-                
-                # Calculate cumulative RM from all non-cancelled batches
-                for batch in obj.batches.exclude(status='cancelled'):
-                    batch_strips = Decimal(str(batch.planned_quantity or 0))
-                    cumulative_rm_released += batch_strips
-            
-            # Calculate remaining
-            remaining = float(total_rm_required - cumulative_rm_released)
-            return max(0, remaining)  # Never return negative
-            
-        except Exception as e:
-            logger.error(f"Error calculating remaining RM for MO {obj.mo_id}: {str(e)}")
+            total_grams = obj.quantity * obj.product_code.grams_per_product
+            base_rm_kg = Decimal(str(total_grams / 1000))
+            tolerance = obj.tolerance_percentage or Decimal('2.00')
+            tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
+            return float(base_rm_kg * tolerance_factor)
+        except Exception:
             return None
-    
-    def get_rm_unit(self, obj):
-        """Get RM unit based on material type"""
-        product = obj.product_code
-        if not product:
-            return 'kg'
-        return 'kg' if product.material_type == 'coil' else 'strips'
-    
-    def get_can_create_batch(self, obj):
-        """Check if more batches can be created"""
-        remaining = self.get_remaining_rm(obj)
-        if remaining is None:
-            return True  # Default to allowing batch creation if calculation fails
-        
-        product = obj.product_code
-        if not product:
-            return True
-        
-        # Threshold: 0.05 kg for coil, 1 strip for sheet
-        threshold = 0.05 if product.material_type == 'coil' else 1
-        return remaining > threshold
     
     class Meta:
         model = ManufacturingOrder
         fields = [
-            'id', 'mo_id', 'date_time', 'product_code', 'quantity', 'status', 
-            'status_display', 'priority', 'priority_display', 'shift', 'shift_display',
-            'planned_start_date', 'planned_end_date',
-            'delivery_date', 'created_by', 'created_at', 'strips_required', 
-            'total_pieces_from_strips', 'excess_pieces', 'tolerance_percentage',
-            'material_type', 'material_name', 'batches', 'remaining_rm', 'rm_unit', 'can_create_batch'
+            'id', 'mo_id', 'status', 'status_display', 'priority', 'priority_display',
+            'product_code_display', 'product_code_code', 'quantity', 'rm_required_kg',
+            'created_at', 'delivery_date'
         ]
-        read_only_fields = ['mo_id', 'date_time']
+        read_only_fields = ['mo_id']
 
 
 class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
@@ -617,25 +568,53 @@ class PurchaseOrderStatusSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
 
 
-class PurchaseOrderListSerializer(serializers.ModelSerializer):
-    """Optimized serializer for PO list view"""
-    rm_code = RawMaterialBasicSerializer(read_only=True)
-    vendor_name = VendorBasicSerializer(read_only=True)
-    created_by = UserBasicSerializer(read_only=True)
-    status_display = serializers.CharField(source='get_status_display', read_only=True)
+class RawMaterialMinimalSerializer(serializers.ModelSerializer):
+    """Minimal raw material serializer for nested PO relationships - only fields needed for GRM creation"""
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
-    cancelled_by_role = serializers.CharField(source='get_cancelled_by_role', read_only=True)
-    cancellation_display = serializers.CharField(source='get_cancellation_display', read_only=True)
+    
+    class Meta:
+        model = RawMaterial
+        fields = [
+            'id', 'material_code', 'material_name', 'material_type', 'material_type_display', 'grade'
+        ]
+        read_only_fields = fields
+
+
+class PurchaseOrderListSerializer(serializers.ModelSerializer):
+    """Optimized serializer for PO list view - returns only fields shown in frontend"""
+    material_name = serializers.SerializerMethodField()
+    material_code = serializers.SerializerMethodField()
+    vendor_name_display = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    rm_code = RawMaterialMinimalSerializer(read_only=True)  # Include nested rm_code for GRM creation
+    vendor_name = VendorBasicSerializer(read_only=True)  # Include nested vendor_name for GRM creation
+    
+    def get_material_name(self, obj):
+        """Get material name"""
+        if obj.rm_code:
+            return getattr(obj.rm_code, 'material_name', None)
+        return None
+    
+    def get_material_code(self, obj):
+        """Get material code"""
+        if obj.rm_code:
+            return getattr(obj.rm_code, 'material_code', None)
+        return None
+    
+    def get_vendor_name_display(self, obj):
+        """Get vendor name"""
+        if obj.vendor_name:
+            return getattr(obj.vendor_name, 'name', None)
+        return None
     
     class Meta:
         model = PurchaseOrder
         fields = [
-            'id', 'po_id', 'date_time', 'rm_code', 'vendor_name', 'quantity_ordered', 'quantity_received',
-            'status', 'status_display', 'material_type',
-            'material_type_display', 'expected_date', 'created_by', 'created_at',
-            'cancelled_at', 'cancelled_by_role', 'cancellation_display', 'cancellation_reason'
+            'id', 'po_id', 'status', 'status_display', 'material_name', 'material_code',
+            'quantity_ordered', 'vendor_name_display', 'total_amount', 'created_at',
+            'expected_date', 'unit_price', 'rm_code', 'vendor_name'
         ]
-        read_only_fields = ['po_id', 'date_time']
+        read_only_fields = ['po_id', 'total_amount']
 
 
 # Process Execution Serializers
@@ -859,6 +838,69 @@ class MOProcessExecutionMinimalSerializer(serializers.ModelSerializer):
         return _get_batch_counts_for_process(obj)
 
 
+class MOProcessExecutionStartResponseSerializer(serializers.ModelSerializer):
+    """Ultra-minimal serializer for start_process response - only essential fields"""
+    process_name = serializers.CharField(source='process.name', read_only=True)
+    batches_allocated = serializers.SerializerMethodField()
+    has_batches = serializers.SerializerMethodField()
+    all_rm_allocated = serializers.SerializerMethodField()
+    can_complete_process = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = MOProcessExecution
+        fields = ['id', 'process_name', 'status', 'batches_allocated', 'has_batches', 'all_rm_allocated', 'can_complete_process']
+        read_only_fields = ['id', 'process_name', 'status', 'batches_allocated', 'has_batches', 'all_rm_allocated', 'can_complete_process']
+    
+    def get_batches_allocated(self, obj):
+        """Get batches allocated to this process for this MO"""
+        mo = obj.mo
+        batches = mo.batches.exclude(status='cancelled')
+        if batches.exists():
+            return [
+                {
+                    'id': batch.id,
+                    'batch_id': batch.batch_id,
+                    'status': batch.status,
+                    'planned_quantity': float(batch.planned_quantity) if batch.planned_quantity else 0,
+                }
+                for batch in batches
+            ]
+        return []
+    
+    def get_has_batches(self, obj):
+        """Check if there are any batches allocated"""
+        mo = obj.mo
+        return mo.batches.exclude(status='cancelled').exists()
+    
+    def get_all_rm_allocated(self, obj):
+        """Check if all RM required for MO is allocated through batches"""
+        mo = obj.mo
+        # If no batches exist, RM is not allocated
+        if not mo.batches.exclude(status='cancelled').exists():
+            return False
+        
+        # Check if all RM is allocated (can't create more batches)
+        # This means total_rm_released_kg >= total_rm_limit_kg
+        return not mo.can_create_batch
+    
+    def get_can_complete_process(self, obj):
+        """
+        Check if process can be completed
+        Can complete if:
+        1. No batches allocated (no RM allocated yet), OR
+        2. All batches allocated (all RM is allocated through batches)
+        """
+        mo = obj.mo
+        has_batches = mo.batches.exclude(status='cancelled').exists()
+        
+        # If no batches, can complete (no RM allocated)
+        if not has_batches:
+            return True
+        
+        # If batches exist, can only complete if all RM is allocated
+        return not mo.can_create_batch
+
+
 class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
     """Highly optimized MO serializer for production-head MO detail page - only essential fields"""
     product_code_display = serializers.CharField(source='product_code.product_code', read_only=True)
@@ -867,6 +909,7 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
     shift_display = serializers.CharField(source='get_shift_display', read_only=True)
     process_executions = MOProcessExecutionMinimalSerializer(many=True, read_only=True)
     overall_progress = serializers.SerializerMethodField()
+    can_create_batch = serializers.ReadOnlyField()
 
     class Meta:
         model = ManufacturingOrder
@@ -878,9 +921,9 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
             'id', 'mo_id', 'product_code_display', 'quantity', 'material_name', 'grade',
             'shift', 'shift_display', 'status', 'status_display', 'priority', 'priority_display',
             'delivery_date', 'special_instructions', 'process_executions',
-            'overall_progress', 'rejected_at'
+            'overall_progress', 'rejected_at', 'can_create_batch'
         ]
-        read_only_fields = ['mo_id', 'created_at', 'updated_at']
+        read_only_fields = ['mo_id', 'created_at', 'updated_at', 'can_create_batch']
     
     def get_overall_progress(self, obj):
         """Calculate overall progress across all processes"""

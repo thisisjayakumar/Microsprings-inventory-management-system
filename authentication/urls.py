@@ -23,6 +23,8 @@ urlpatterns = [
     path('register/', views.register_user, name='register'),
     path('login/', views.CustomTokenObtainPairView.as_view(), name='login'),
     path('logout/', views.logout_user, name='logout'),
+    path('break-types/', views.get_break_types, name='get_break_types'),
+    path('resume-after-break/', views.resume_after_break, name='resume_after_break'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     
     # User profile endpoints
