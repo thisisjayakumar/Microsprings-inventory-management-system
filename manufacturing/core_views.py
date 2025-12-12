@@ -1204,7 +1204,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         
         # Get all MOs (no assignment filtering - all RM store users see all MOs)
         base_queryset = ManufacturingOrder.objects.select_related(
-            'product_code', 'product_code__customer_c_id', 'customer_c_id',
+            'product_code', 'product_code__customer_c_id', 'product_code__material', 'customer_c_id',
             'created_by'
         ).prefetch_related('batches')
         
@@ -2828,7 +2828,7 @@ class BatchViewSet(viewsets.ModelViewSet):
         - % completion based on batches
         """
         try:
-            mo = ManufacturingOrder.objects.select_related('product_code').get(id=mo_id)
+            mo = ManufacturingOrder.objects.select_related('product_code', 'product_code__material').get(id=mo_id)
         except ManufacturingOrder.DoesNotExist:
             return Response(
                 {'error': 'Manufacturing Order not found'},
@@ -2936,6 +2936,7 @@ class BatchViewSet(viewsets.ModelViewSet):
             'mo_id': mo.mo_id,
             'mo_quantity': mo.quantity,
             'material_type': product.material_type,
+            'material_code': product.material.material_code if product.material else None,
             'total_rm_required': total_rm_required,
             'rm_unit': rm_unit,
             'cumulative_rm_released': float(cumulative_rm_released),

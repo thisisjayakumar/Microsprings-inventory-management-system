@@ -186,6 +186,7 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
     """Optimized serializer for MO list view - returns only fields shown in frontend"""
     product_code_display = serializers.SerializerMethodField()
     product_code_code = serializers.SerializerMethodField()
+    material_code = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     rm_required_kg = serializers.SerializerMethodField()
@@ -200,6 +201,12 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
         """Get product code"""
         if obj.product_code:
             return getattr(obj.product_code, 'product_code', None)
+        return None
+    
+    def get_material_code(self, obj):
+        """Get material code from product's associated raw material"""
+        if obj.product_code and obj.product_code.material:
+            return getattr(obj.product_code.material, 'material_code', None)
         return None
     
     def get_rm_required_kg(self, obj):
@@ -219,7 +226,7 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
         model = ManufacturingOrder
         fields = [
             'id', 'mo_id', 'status', 'status_display', 'priority', 'priority_display',
-            'product_code_display', 'product_code_code', 'quantity', 'rm_required_kg',
+            'product_code_display', 'product_code_code', 'material_code', 'quantity', 'rm_required_kg',
             'created_at', 'delivery_date'
         ]
         read_only_fields = ['mo_id']
