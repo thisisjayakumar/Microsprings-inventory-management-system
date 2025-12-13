@@ -44,29 +44,7 @@ class RMAllocationService:
             raw_material = mo.product_code.material
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Raw material: {raw_material.material_code} (ID: {raw_material.id})")
             
-            # Calculate required quantity
-            # If RM is pending from PO, only allocate available RM (excluding pending PO quantity)
-            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
-                # Check if related PO is completed
-                related_pos = mo.related_purchase_orders.filter(status='rm_completed')
-                if not related_pos.exists():
-                    # PO not completed - only allocate available RM (excluding pending PO quantity)
-                    required_quantity_kg = Decimal(str(mo.rm_required_kg)) - Decimal(str(mo.pending_po_quantity_kg))
-                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - RM pending from PO. Allocating only available RM: {required_quantity_kg}kg (Total: {mo.rm_required_kg}kg, Pending: {mo.pending_po_quantity_kg}kg)")
-                else:
-                    # PO completed - allocate full required quantity
-                    required_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
-                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - PO completed. Allocating full required quantity: {required_quantity_kg}kg")
-            else:
-                # No pending PO - allocate full required quantity
-                required_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
-                logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity: {required_quantity_kg}kg")
-            
-            if required_quantity_kg <= 0:
-                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity is 0 or negative. Possible cause: rm_required_kg not calculated or all RM is pending from PO")
-                raise ValidationError("Required RM quantity must be greater than 0. Ensure MO.calculate_rm_requirements() was called or wait for PO completion.")
-            
-            # Check if stock is available
+            # Check stock availability first (needed for partial allocation logic)
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Checking stock for material ID: {raw_material.id}")
             
             stock_balance = RMStockBalanceHeat.objects.filter(
@@ -88,13 +66,52 @@ class RMAllocationService:
                 available_qty = stock_balance.total_available_quantity_kg
                 logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - RMStockBalanceHeat found: Available stock: {available_qty}kg")
             
-            if available_qty < required_quantity_kg:
-                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - INSUFFICIENT STOCK. Required: {required_quantity_kg}kg, Available: {available_qty}kg")
+            # Calculate required quantity
+            # If RM is pending from PO, only allocate available RM (excluding pending PO quantity)
+            desired_quantity_kg = None
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                # Check if related PO is completed
+                related_pos = mo.related_purchase_orders.filter(status='rm_completed')
+                if not related_pos.exists():
+                    # PO not completed - desired allocation is total minus pending PO quantity
+                    desired_quantity_kg = Decimal(str(mo.rm_required_kg)) - Decimal(str(mo.pending_po_quantity_kg))
+                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - RM pending from PO. Desired allocation: {desired_quantity_kg}kg (Total: {mo.rm_required_kg}kg, Pending from PO: {mo.pending_po_quantity_kg}kg, Available stock: {available_qty}kg)")
+                else:
+                    # PO completed - allocate full required quantity
+                    desired_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
+                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - PO completed. Allocating full required quantity: {desired_quantity_kg}kg")
+            else:
+                # No pending PO - allocate full required quantity
+                desired_quantity_kg = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
+                logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity: {desired_quantity_kg}kg")
+            
+            # Determine actual quantity to allocate
+            # If there's a pending PO and stock is insufficient, allocate what's available
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg and available_qty < desired_quantity_kg:
+                # Partial allocation: reserve what's available, rest will come from PO
+                required_quantity_kg = available_qty  # Allocate what's available
+                logger.warning(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Partial allocation: Desired {desired_quantity_kg}kg but only {available_qty}kg available. Allocating available stock. Rest ({desired_quantity_kg - available_qty}kg) will come from PO.")
+            elif available_qty < desired_quantity_kg:
+                # No pending PO but insufficient stock - this is an error
+                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - INSUFFICIENT STOCK. Required: {desired_quantity_kg}kg, Available: {available_qty}kg")
                 raise ValidationError(
                     f"Insufficient stock for {raw_material.material_code}. "
-                    f"Required: {required_quantity_kg}kg, "
+                    f"Required: {desired_quantity_kg}kg, "
                     f"Available: {available_qty}kg"
                 )
+            else:
+                # Sufficient stock available
+                required_quantity_kg = desired_quantity_kg
+                logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Sufficient stock. Allocating {required_quantity_kg}kg")
+            
+            if required_quantity_kg <= 0:
+                if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                    logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - No available stock to reserve. All RM ({mo.rm_required_kg}kg) is pending from PO ({mo.pending_po_quantity_kg}kg). Reservation will happen when PO materials arrive.")
+                    # Return empty allocations - nothing to reserve now
+                    return []
+                else:
+                    logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Required quantity is 0 or negative. Possible cause: rm_required_kg not calculated")
+                    raise ValidationError("Required RM quantity must be greater than 0. Ensure MO.calculate_rm_requirements() was called.")
             
             # Check for existing allocations to avoid duplicates
             existing_allocation = RawMaterialAllocation.objects.filter(
@@ -118,6 +135,12 @@ class RMAllocationService:
             
             # Create allocation (reserved status - not locked yet)
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Creating new reservation...")
+            
+            # Build notes indicating partial allocation if applicable
+            notes = f"Initial allocation for MO {mo.mo_id}"
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg and required_quantity_kg < desired_quantity_kg:
+                notes = f"Partial allocation for MO {mo.mo_id}: {required_quantity_kg}kg reserved from stock, {mo.pending_po_quantity_kg}kg pending from PO"
+            
             allocation = RawMaterialAllocation.objects.create(
                 mo=mo,
                 raw_material=raw_material,
@@ -125,7 +148,7 @@ class RMAllocationService:
                 status='reserved',
                 can_be_swapped=True,
                 allocated_by=allocated_by_user,
-                notes=f"Initial allocation for MO {mo.mo_id}"
+                notes=notes
             )
             logger.info(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Allocation created: ID={allocation.id}, Status={allocation.status}, Qty={allocation.allocated_quantity_kg}kg")
             
