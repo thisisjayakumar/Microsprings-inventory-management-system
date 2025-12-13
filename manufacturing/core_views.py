@@ -851,6 +851,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         mo.gm_approved_by = request.user
         
         # Reserve RM and reduce stock balance when MO is approved
+        allocation_error = None
         with transaction.atomic():
             mo.save()
             
@@ -901,10 +902,13 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                     else:
                         logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - No RM required (rm_required_kg = {mo.rm_required_kg})")
             except Exception as alloc_error:
-                logger.error(f"[RM_RESERVATION] MO {mo.mo_id} - Failed to reserve RM during approval: {str(alloc_error)}")
+                error_message = str(alloc_error)
+                logger.error(f"[RM_RESERVATION] MO {mo.mo_id} - Failed to reserve RM during approval: {error_message}")
                 logger.exception(alloc_error)
                 # Don't fail MO approval if RM reservation fails - just log it
                 # The MO is still approved, RM can be reserved later
+                # Store error for response
+                allocation_error = error_message
         
         logger.info(f"[RM_RESERVATION] MO {mo.mo_id} approved. Status: {old_status} → mo_approved. RM reserved and stock balance updated.")
         
@@ -917,11 +921,43 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             notes=request.data.get('notes', 'MO approved by manager')
         )
         
+        # Get final allocation status for response
+        from manufacturing.models import RawMaterialAllocation
+        final_allocations = RawMaterialAllocation.objects.filter(mo=mo)
+        reserved_count = final_allocations.filter(status='reserved').count()
+        reserved_total_kg = sum(float(a.allocated_quantity_kg) for a in final_allocations.filter(status='reserved'))
+        required_kg = float(mo.rm_required_kg) if mo.rm_required_kg else 0
+        
+        # Build appropriate message based on allocation status
+        if reserved_total_kg > 0:
+            if mo.rm_pending_from_po and mo.pending_po_quantity_kg and reserved_total_kg < required_kg:
+                # Partial allocation - some reserved, rest pending from PO
+                pending_portion = required_kg - reserved_total_kg
+                message = f'MO approved successfully! {reserved_total_kg:.2f} kg reserved from stock, {pending_portion:.2f} kg pending from PO.'
+            else:
+                message = f'MO approved successfully! {reserved_total_kg:.2f} kg of raw materials have been reserved.'
+        elif mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+            message = 'MO approved successfully! RM reservation will be completed when PO materials arrive.'
+        elif required_kg > 0:
+            message = 'MO approved successfully! Note: RM reservation may be pending. Please check RM allocation status.'
+        else:
+            message = 'MO approved successfully! No RM reservation needed for this order.'
+        
         serializer = ManufacturingOrderWithProcessesSerializer(mo)
-        return Response({
-            'message': 'MO approved successfully! RM has been reserved and stock balance updated.',
-            'mo': serializer.data
-        })
+        response_data = {
+            'message': message,
+            'mo': serializer.data,
+            'rm_reservation_status': {
+                'reserved_count': reserved_count,
+                'reserved_kg': reserved_total_kg,
+                'required_kg': required_kg,
+                'is_fully_reserved': reserved_total_kg >= required_kg if required_kg > 0 else False,
+                'rm_pending_from_po': mo.rm_pending_from_po,
+                'pending_po_quantity_kg': float(mo.pending_po_quantity_kg) if mo.pending_po_quantity_kg else 0,
+                'allocation_error': allocation_error if allocation_error else None
+            }
+        }
+        return Response(response_data)
     
     def _handle_start_production(self, mo, request):
         """Handle production start (mo_approved → in_progress) - Production Head only"""
@@ -1145,11 +1181,11 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Update allowed fields - production heads can edit more fields when status is on_hold
+        # Update allowed fields - production heads can edit quantity when status is on_hold (shift removed)
         if 'production_head' in user_roles and mo.status == 'on_hold':
-            allowed_fields = ['shift', 'quantity']
+            allowed_fields = ['quantity']
         else:
-            allowed_fields = ['shift']
+            allowed_fields = ['shift']  # Manager can still edit shift
         
         updated_fields = []
         
@@ -1506,6 +1542,87 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             return Response(
                 {'error': f'Failed to dispatch: {str(e)}'}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=True, methods=['post'], url_path='retry-rm-allocation', permission_classes=[IsAuthenticated])
+    def retry_rm_allocation(self, request, pk=None):
+        """
+        Manually trigger RM allocation for an approved MO that failed to allocate during approval
+        Can be used by managers or production heads to retry allocation
+        """
+        mo = self.get_object()
+        
+        # Check if user is manager or production_head
+        user_roles = request.user.user_roles.values_list('role__name', flat=True)
+        if not any(role in ['manager', 'production_head'] for role in user_roles):
+            return Response(
+                {'error': 'Only managers or production heads can retry RM allocation'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Check MO status - must be approved
+        if mo.status not in ['mo_approved', 'in_progress']:
+            return Response(
+                {'error': f'Cannot allocate RM for MO in {mo.status} status. MO must be approved first.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if RM is already allocated
+        from manufacturing.models import RawMaterialAllocation
+        existing_allocations = RawMaterialAllocation.objects.filter(mo=mo, status__in=['reserved', 'locked'])
+        if existing_allocations.exists():
+            total_reserved = sum(float(a.allocated_quantity_kg) for a in existing_allocations)
+            required_kg = float(mo.rm_required_kg) if mo.rm_required_kg else 0
+            if total_reserved >= required_kg:
+                return Response({
+                    'message': f'RM already fully allocated. Reserved: {total_reserved}kg, Required: {required_kg}kg',
+                    'reserved_kg': total_reserved,
+                    'required_kg': required_kg
+                })
+        
+        # Try to allocate RM
+        try:
+            from manufacturing.services.rm_allocation import RMAllocationService
+            from inventory.models import RMStockBalance
+            
+            reservation_result = RMAllocationService.allocate_rm_for_mo(mo, request.user)
+            
+            if reservation_result:
+                # Decrement RMStockBalance available_quantity for reserved qty
+                raw_material = mo.product_code.material
+                if raw_material:
+                    total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                    stock_balance, _ = RMStockBalance.objects.get_or_create(
+                        raw_material=raw_material,
+                        defaults={'available_quantity': Decimal('0')}
+                    )
+                    stock_balance.available_quantity -= Decimal(str(total_reserved_kg))
+                    stock_balance.save()
+                
+                # Get final allocation status
+                final_allocations = RawMaterialAllocation.objects.filter(mo=mo, status='reserved')
+                reserved_total_kg = sum(float(a.allocated_quantity_kg) for a in final_allocations)
+                required_kg = float(mo.rm_required_kg) if mo.rm_required_kg else 0
+                
+                return Response({
+                    'success': True,
+                    'message': f'Successfully allocated {reserved_total_kg:.2f} kg of raw materials.',
+                    'reserved_kg': reserved_total_kg,
+                    'required_kg': required_kg,
+                    'is_fully_reserved': reserved_total_kg >= required_kg if required_kg > 0 else False
+                })
+            else:
+                return Response(
+                    {'error': 'Allocation returned no results. Check logs for details.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except Exception as e:
+            error_message = str(e)
+            logger.error(f"[RM_RESERVATION] Manual retry failed for MO {mo.mo_id}: {error_message}")
+            logger.exception(e)
+            return Response(
+                {'error': f'Failed to allocate RM: {error_message}'}, 
+                status=status.HTTP_400_BAD_REQUEST
             )
     
     @action(detail=True, methods=['post'], url_path='add-additional-rm', permission_classes=[IsAuthenticated])
@@ -2003,19 +2120,63 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             po.cancelled_by = request.user
             po.cancellation_reason = rejection_reason
         elif new_status == 'rm_completed':
-            # When PO is completed, update related MO to clear RM pending status
+            # When PO is completed, update related MO to clear RM pending status and allocate additional RM
             if po.related_mo:
                 mo = po.related_mo
+                from decimal import Decimal
+                pending_po_qty_kg = mo.pending_po_quantity_kg or Decimal('0')
+                
                 # If RM was pending from PO, update rm_required_kg to include pending PO quantity
-                if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
-                    from decimal import Decimal
+                if mo.rm_pending_from_po and pending_po_qty_kg > 0:
                     # Update rm_required_kg to include the pending PO quantity
-                    mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
+                    mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + pending_po_qty_kg
                     logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
                 
                 mo.rm_pending_from_po = False
                 mo.pending_po_quantity_kg = None
                 mo.save()
+                
+                # Automatically allocate additional RM from the completed PO
+                try:
+                    from manufacturing.services.rm_allocation import RMAllocationService
+                    from manufacturing.models import RawMaterialAllocation
+                    from inventory.models import RMStockBalance
+                    
+                    # Check current allocations
+                    existing_allocations = RawMaterialAllocation.objects.filter(
+                        mo=mo, 
+                        status__in=['reserved', 'locked']
+                    )
+                    current_reserved_kg = sum(
+                        float(a.allocated_quantity_kg) for a in existing_allocations.filter(status='reserved')
+                    )
+                    required_kg = float(mo.rm_required_kg) if mo.rm_required_kg else 0
+                    
+                    # Allocate additional RM if needed (the pending PO quantity)
+                    if required_kg > current_reserved_kg:
+                        logger.info(f"[PO_COMPLETED] MO {mo.mo_id} - Allocating additional RM from completed PO {po.po_id}. Current reserved: {current_reserved_kg}kg, Required: {required_kg}kg")
+                        reservation_result = RMAllocationService.allocate_rm_for_mo(mo, request.user)
+                        
+                        if reservation_result:
+                            total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                            # Decrement RMStockBalance available_quantity for newly reserved qty
+                            if mo.product_code and mo.product_code.material:
+                                raw_material = mo.product_code.material
+                                stock_balance, _ = RMStockBalance.objects.get_or_create(
+                                    raw_material=raw_material,
+                                    defaults={'available_quantity': Decimal('0')}
+                                )
+                                stock_balance.available_quantity -= Decimal(str(total_reserved_kg))
+                                stock_balance.save()
+                                logger.info(f"[PO_COMPLETED] MO {mo.mo_id} - Allocated {total_reserved_kg}kg from PO {po.po_id} and deducted from RMStockBalance")
+                        else:
+                            logger.warning(f"[PO_COMPLETED] MO {mo.mo_id} - RM allocation returned no results. Stock may be insufficient.")
+                    else:
+                        logger.info(f"[PO_COMPLETED] MO {mo.mo_id} - RM already fully allocated ({current_reserved_kg}kg >= {required_kg}kg)")
+                except Exception as alloc_error:
+                    logger.error(f"[PO_COMPLETED] MO {mo.mo_id} - Failed to allocate RM from completed PO {po.po_id}: {str(alloc_error)}")
+                    logger.exception(alloc_error)
+                    # Don't fail PO status change if RM allocation fails - just log it
                 
                 # Create transaction history for MO
                 try:
@@ -4140,7 +4301,43 @@ class RawMaterialAllocationViewSet(viewsets.ReadOnlyModelViewSet):
         
         logger.info(f"[DEBUG] by_mo API - MO {mo.mo_id} - Reserved: {total_reserved}kg, Locked: {total_locked}kg, Required: {required_kg}kg, Fully Reserved: {is_fully_reserved}")
         
-        return Response({
+        # Add diagnostic information if no allocations exist but RM is required
+        diagnostic_info = None
+        if total_reserved == 0 and total_locked == 0 and required_kg > 0:
+            diagnostic_info = {
+                'mo_has_product_code': bool(mo.product_code),
+                'mo_has_raw_material': bool(mo.product_code and mo.product_code.material) if mo.product_code else False,
+                'rm_required_kg': float(mo.rm_required_kg) if mo.rm_required_kg else 0,
+                'rm_pending_from_po': mo.rm_pending_from_po,
+                'pending_po_quantity_kg': float(mo.pending_po_quantity_kg) if mo.pending_po_quantity_kg else 0,
+                'calculated_available_rm_kg': float(mo.rm_required_kg - mo.pending_po_quantity_kg) if (mo.rm_required_kg and mo.pending_po_quantity_kg) else (float(mo.rm_required_kg) if mo.rm_required_kg else 0),
+                'possible_reasons': []
+            }
+            
+            if not mo.product_code:
+                diagnostic_info['possible_reasons'].append('MO has no product_code assigned')
+            elif not mo.product_code.material:
+                diagnostic_info['possible_reasons'].append(f'Product {mo.product_code.product_code} has no associated raw material')
+            elif not mo.rm_required_kg or mo.rm_required_kg == 0:
+                diagnostic_info['possible_reasons'].append('rm_required_kg is 0 or not set. Call MO.calculate_rm_requirements() to calculate.')
+            elif mo.rm_pending_from_po and mo.pending_po_quantity_kg and mo.pending_po_quantity_kg >= mo.rm_required_kg:
+                diagnostic_info['possible_reasons'].append(f'All RM ({mo.pending_po_quantity_kg}kg) is pending from PO. Reservation will happen when PO materials arrive.')
+            else:
+                # Check stock availability
+                if mo.product_code and mo.product_code.material:
+                    from inventory.models import RMStockBalanceHeat, RMStockBalance
+                    stock_balance_heat = RMStockBalanceHeat.objects.filter(raw_material=mo.product_code.material).first()
+                    stock_balance = RMStockBalance.objects.filter(raw_material=mo.product_code.material).first()
+                    available_stock = stock_balance_heat.total_available_quantity_kg if stock_balance_heat else (stock_balance.available_quantity if stock_balance else 0)
+                    diagnostic_info['available_stock_kg'] = float(available_stock) if available_stock else 0
+                    
+                    calculated_required = float(mo.rm_required_kg - mo.pending_po_quantity_kg) if (mo.rm_pending_from_po and mo.pending_po_quantity_kg) else float(mo.rm_required_kg)
+                    if available_stock < calculated_required:
+                        diagnostic_info['possible_reasons'].append(f'Insufficient stock. Available: {float(available_stock)}kg, Required: {calculated_required}kg')
+                    else:
+                        diagnostic_info['possible_reasons'].append('Allocation may have failed during approval. Check backend logs for [RM_RESERVATION] entries.')
+        
+        response_data = {
             'mo_id': mo.mo_id,
             'mo_priority': mo.priority,
             'mo_status': mo.status,
@@ -4153,7 +4350,12 @@ class RawMaterialAllocationViewSet(viewsets.ReadOnlyModelViewSet):
             'total_locked_kg': total_locked,
             'total_reserved_locked_kg': total_reserved_locked,
             'summary': summary
-        })
+        }
+        
+        if diagnostic_info:
+            response_data['diagnostic'] = diagnostic_info
+        
+        return Response(response_data)
     
     @action(detail=False, methods=['post'])
     def check_availability(self, request):

@@ -910,6 +910,7 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
     process_executions = MOProcessExecutionMinimalSerializer(many=True, read_only=True)
     overall_progress = serializers.SerializerMethodField()
     can_create_batch = serializers.ReadOnlyField()
+    related_purchase_orders = serializers.SerializerMethodField()
 
     class Meta:
         model = ManufacturingOrder
@@ -921,9 +922,25 @@ class ManufacturingOrderWithProcessesSerializer(serializers.ModelSerializer):
             'id', 'mo_id', 'product_code_display', 'quantity', 'material_name', 'grade',
             'shift', 'shift_display', 'status', 'status_display', 'priority', 'priority_display',
             'delivery_date', 'special_instructions', 'process_executions',
-            'overall_progress', 'rejected_at', 'can_create_batch'
+            'overall_progress', 'rejected_at', 'can_create_batch', 'related_purchase_orders'
         ]
         read_only_fields = ['mo_id', 'created_at', 'updated_at', 'can_create_batch']
+    
+    def get_related_purchase_orders(self, obj):
+        """Get all related purchase orders for this MO"""
+        related_pos = obj.related_purchase_orders.all()
+        return [
+            {
+                'id': po.id,
+                'po_id': po.po_id,
+                'status': po.status,
+                'status_display': po.get_status_display(),
+                'quantity_ordered': float(po.quantity_ordered) if po.quantity_ordered else None,
+                'quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                'created_at': po.created_at.isoformat() if po.created_at else None,
+            }
+            for po in related_pos
+        ]
     
     def get_overall_progress(self, obj):
         """Calculate overall progress across all processes"""
