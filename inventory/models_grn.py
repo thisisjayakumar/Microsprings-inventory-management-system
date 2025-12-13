@@ -139,6 +139,8 @@ class HeatNumber(models.Model):
     
     # Quality Information
     quality_certificate_number = models.CharField(max_length=100, blank=True)
+    # NOTE: test_certificate_date - Reserved for future use. 
+    # Currently not exposed via API or used in frontend.
     test_certificate_date = models.DateField(null=True, blank=True)
     
     # Physical Location in Store

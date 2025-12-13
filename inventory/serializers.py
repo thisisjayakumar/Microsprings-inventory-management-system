@@ -388,7 +388,7 @@ class HeatNumberSerializer(serializers.ModelSerializer):
         model = HeatNumber
         fields = [
             'id', 'heat_number', 'grn_receipt', 'raw_material', 'raw_material_details',
-            'coils_received', 'total_weight_kg', 'sheets_received', 'test_certificate_date',
+            'coils_received', 'total_weight_kg', 'sheets_received',
             'items', 'is_available', 'consumed_quantity_kg', 'available_quantity_kg', 'available_coils',
             'grn_number', 'created_at', 'updated_at'
         ]

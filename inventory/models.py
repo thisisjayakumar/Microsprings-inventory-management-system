@@ -395,6 +395,8 @@ class HeatNumber(models.Model):
     )
     
     # Quality Information
+    # NOTE: test_certificate_date - Reserved for future use. 
+    # Currently not exposed via API or used in frontend.
     test_certificate_date = models.DateField(null=True, blank=True)
     
     # Individual items (coils/sheets) details
