@@ -16,15 +16,15 @@ from decimal import Decimal
 from products.models import Product
 from .models import (
     RMStockBalance, RawMaterial, InventoryTransaction,
-    GRMReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
+    GRNReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
     HandoverIssue, RMReturn, Location
 )
 from .serializers import (
     ProductListSerializer, ProductCreateUpdateSerializer,
     RMStockBalanceSerializer, RMStockBalanceUpdateSerializer,
     ProductStockDashboardSerializer, RawMaterialBasicSerializer,
-    InventoryTransactionSerializer, GRMReceiptSerializer, GRMReceiptCreateSerializer,
-    GRMReceiptListSerializer, HeatNumberSerializer, RMStockBalanceHeatSerializer,
+    InventoryTransactionSerializer, GRNReceiptSerializer, GRNReceiptCreateSerializer,
+    GRNReceiptListSerializer, HeatNumberSerializer, RMStockBalanceHeatSerializer,
     InventoryTransactionHeatSerializer, HeatNumberHandoverSerializer,
     HandoverIssueSerializer, HandoverIssueCreateSerializer, HandoverVerifySerializer,
     RMReturnSerializer, RMReturnCreateSerializer, RMReturnDispositionSerializer,
@@ -361,7 +361,7 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
         queryset = super().get_queryset()
         if self.action in ['list', 'retrieve']:
             queryset = queryset.prefetch_related(
-                'heat_numbers__grm_receipt'
+                'heat_numbers__grn_receipt'
             )
         return queryset
     
@@ -468,98 +468,98 @@ def rm_store_dashboard_stats(request):
 
 @api_view(['GET'])
 @permission_classes([AllowAny])  # Temporarily allow any access for testing
-def test_grm_api(request):
-    """Test endpoint to check if GRM API is working"""
+def test_grn_api(request):
+    """Test endpoint to check if GRN API is working"""
     try:
         # Simple test without complex queries
         return Response({
-            'message': 'GRM API is working',
+            'message': 'GRN API is working',
             'status': 'success',
             'timestamp': timezone.now().isoformat(),
             'user': request.user.username if request.user.is_authenticated else 'anonymous'
         })
     except Exception as e:
         return Response({
-            'error': 'GRM API test failed',
+            'error': 'GRN API test failed',
             'detail': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
 @permission_classes([AllowAny])  # Temporarily allow any access for testing
-def test_grm_models(request):
-    """Test endpoint to check if GRM models are accessible"""
+def test_grn_models(request):
+    """Test endpoint to check if GRN models are accessible"""
     try:
-        grm_count = GRMReceipt.objects.count()
+        grn_count = GRNReceipt.objects.count()
         heat_count = HeatNumber.objects.count()
         return Response({
-            'message': 'GRM Models are accessible',
-            'grm_receipts_count': grm_count,
+            'message': 'GRN Models are accessible',
+            'grn_receipts_count': grn_count,
             'heat_numbers_count': heat_count,
             'status': 'success'
         })
     except Exception as e:
         return Response({
-            'error': 'GRM Models test failed',
+            'error': 'GRN Models test failed',
             'detail': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# GRM and Heat Number ViewSets
+# GRN and Heat Number ViewSets
 
-class GRMReceiptViewSet(viewsets.ModelViewSet):
+class GRNReceiptViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing GRM Receipts
+    ViewSet for managing GRN Receipts
     """
     permission_classes = [IsAuthenticated, IsRMStoreUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'quality_check_passed', 'received_by']
-    search_fields = ['grm_number', 'truck_number', 'driver_name', 'purchase_order__po_id']
-    ordering_fields = ['receipt_date', 'created_at', 'grm_number']
+    search_fields = ['grn_number', 'truck_number', 'driver_name', 'purchase_order__po_id']
+    ordering_fields = ['receipt_date', 'created_at', 'grn_number']
     ordering = ['-receipt_date']
     
     def get_serializer_class(self):
         if self.action == 'create':
-            return GRMReceiptCreateSerializer
+            return GRNReceiptCreateSerializer
         elif self.action == 'list':
-            return GRMReceiptListSerializer
-        return GRMReceiptSerializer
+            return GRNReceiptListSerializer
+        return GRNReceiptSerializer
     
     def get_queryset(self):
-        return GRMReceipt.objects.select_related(
+        return GRNReceipt.objects.select_related(
             'purchase_order', 'purchase_order__vendor_name', 'received_by', 'quality_check_by'
         ).prefetch_related('heat_numbers', 'heat_numbers__raw_material')
     
     @action(detail=True, methods=['post'])
     def complete_receipt(self, request, pk=None):
-        """Mark GRM receipt as completed"""
-        grm_receipt = self.get_object()
+        """Mark GRN receipt as completed"""
+        grn_receipt = self.get_object()
         
-        if grm_receipt.status == 'completed':
-            return Response({'error': 'GRM receipt is already completed'}, 
+        if grn_receipt.status == 'completed':
+            return Response({'error': 'GRN receipt is already completed'}, 
                           status=status.HTTP_400_BAD_REQUEST)
         
-        # Validate that GRM's total weight equals received quantity (with tolerance for rounding)
+        # Validate that GRN's total weight equals received quantity (with tolerance for rounding)
         from decimal import Decimal
         total_weight_from_heat_numbers = Decimal('0')
-        for heat_number in grm_receipt.heat_numbers.all():
+        for heat_number in grn_receipt.heat_numbers.all():
             weight = heat_number.total_weight_kg or Decimal('0')
             total_weight_from_heat_numbers += Decimal(str(weight))
         
-        received_qty = Decimal(str(grm_receipt.purchase_order.quantity_received or 0))
+        received_qty = Decimal(str(grn_receipt.purchase_order.quantity_received or 0))
         
         # Allow 0.01 kg tolerance for rounding differences
         difference = abs(received_qty - total_weight_from_heat_numbers)
         if difference > Decimal('0.01'):
             return Response({
-                'error': f'GRM total weight ({float(total_weight_from_heat_numbers):.2f} kg) does not match received quantity ({float(received_qty):.2f} kg)'
+                'error': f'GRN total weight ({float(total_weight_from_heat_numbers):.2f} kg) does not match received quantity ({float(received_qty):.2f} kg)'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        grm_receipt.status = 'completed'
-        grm_receipt.save()
+        grn_receipt.status = 'completed'
+        grn_receipt.save()
         
         # Update PO status to completed
-        po = grm_receipt.purchase_order
+        po = grn_receipt.purchase_order
         po.status = 'rm_completed'
         po.save()
         
@@ -599,33 +599,33 @@ class GRMReceiptViewSet(viewsets.ModelViewSet):
                 logger.warning(f"Failed to create MO transaction history for PO completion: {str(e)}")
         
         # Update stock balances for all heat numbers
-        for heat_number in grm_receipt.heat_numbers.all():
+        for heat_number in grn_receipt.heat_numbers.all():
             heat_number.update_stock_balance()
         
-        # Create inventory transactions for GRM completion
+        # Create inventory transactions for GRN completion
         try:
-            InventoryTransactionManager.create_grm_completion_transaction(
-                grm_receipt, request.user
+            InventoryTransactionManager.create_grn_completion_transaction(
+                grn_receipt, request.user
             )
         except Exception as e:
-            print(f"Error creating GRM completion transaction: {e}")
+            print(f"Error creating GRN completion transaction: {e}")
             # Don't fail the completion if transaction creation fails
         
-        serializer = self.get_serializer(grm_receipt)
+        serializer = self.get_serializer(grn_receipt)
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def quality_check(self, request, pk=None):
-        """Perform quality check on GRM receipt"""
-        grm_receipt = self.get_object()
+        """Perform quality check on GRN receipt"""
+        grn_receipt = self.get_object()
         
         quality_passed = request.data.get('quality_check_passed', False)
-        grm_receipt.quality_check_passed = quality_passed
-        grm_receipt.quality_check_by = request.user
-        grm_receipt.quality_check_date = timezone.now()
-        grm_receipt.save()
+        grn_receipt.quality_check_passed = quality_passed
+        grn_receipt.quality_check_by = request.user
+        grn_receipt.quality_check_date = timezone.now()
+        grn_receipt.save()
         
-        serializer = self.get_serializer(grm_receipt)
+        serializer = self.get_serializer(grn_receipt)
         return Response(serializer.data)
 
 
@@ -635,14 +635,14 @@ class HeatNumberViewSet(viewsets.ModelViewSet):
     """
     permission_classes = [IsAuthenticated, IsRMStoreUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['is_available', 'raw_material__material_type', 'grm_receipt__status']
-    search_fields = ['heat_number', 'raw_material__material_code', 'grm_receipt__grm_number']
+    filterset_fields = ['is_available', 'raw_material__material_type', 'grn_receipt__status']
+    search_fields = ['heat_number', 'raw_material__material_code', 'grn_receipt__grn_number']
     ordering_fields = ['created_at', 'heat_number', 'total_weight_kg']
     ordering = ['-created_at']
     
     def get_queryset(self):
         return HeatNumber.objects.select_related(
-            'grm_receipt', 'raw_material'
+            'grn_receipt', 'raw_material'
         )
     
     @action(detail=True, methods=['post'])
@@ -758,15 +758,15 @@ class InventoryTransactionHeatViewSet(viewsets.ReadOnlyModelViewSet):
     """
     permission_classes = [IsAuthenticated, IsRMStoreOrProductionHead]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['grm_number', 'heat_number__raw_material__material_type']
-    search_fields = ['grm_number', 'heat_number__heat_number', 'inventory_transaction__transaction_id']
+    filterset_fields = ['grn_number', 'heat_number__raw_material__material_type']
+    search_fields = ['grn_number', 'heat_number__heat_number', 'inventory_transaction__transaction_id']
     ordering_fields = ['inventory_transaction__transaction_datetime']
     ordering = ['-inventory_transaction__transaction_datetime']
     
     def get_queryset(self):
         return InventoryTransactionHeat.objects.select_related(
             'inventory_transaction', 'heat_number', 'heat_number__raw_material',
-            'heat_number__grm_receipt'
+            'heat_number__grn_receipt'
         )
 
 
@@ -814,7 +814,7 @@ def pending_handover_list(request):
             handover_status='pending_handover',
             is_available=True
         ).select_related(
-            'raw_material', 'grm_receipt', 'grm_receipt__purchase_order'
+            'raw_material', 'grn_receipt', 'grn_receipt__purchase_order'
         ).order_by('-created_at')
         
         serializer = HeatNumberHandoverSerializer(heat_numbers, many=True)
@@ -1073,7 +1073,7 @@ def get_material_heat_numbers_coils(request):
     - heat_numbers: List of heat numbers with their coils
         - id: Heat number ID
         - heat_number: Heat number string
-        - grm_number: GRM receipt number
+        - grn_number: GRN receipt number
         - total_weight_kg: Total weight in kg
         - coils_received: Number of coils received
         - available_quantity_kg: Available quantity in kg
@@ -1097,7 +1097,7 @@ def get_material_heat_numbers_coils(request):
     heat_numbers = HeatNumber.objects.filter(
         raw_material=raw_material,
         is_available=True
-    ).select_related('grm_receipt').order_by('-created_at')
+    ).select_related('grn_receipt').order_by('-created_at')
     
     # Serialize the response
     serializer = MaterialHeatNumbersResponseSerializer({
@@ -1271,7 +1271,7 @@ def get_rm_store_returns(request):
         is_available=False,
         coils_received=0,
         total_weight_kg=0
-    ).select_related('raw_material', 'grm_receipt').order_by('-updated_at')
+    ).select_related('raw_material', 'grn_receipt').order_by('-updated_at')
     
     # Apply filters
     material_code = request.query_params.get('material_code')
@@ -1288,10 +1288,10 @@ def get_rm_store_returns(request):
     # Group by material and return date to create return records
     returns_data = []
     for heat in heat_numbers:
-        # Get the original weight from GRM receipt if available, otherwise use 0
+        # Get the original weight from GRN receipt if available, otherwise use 0
         # Note: When coils are returned, total_weight_kg is set to 0, so we need to get original weight
-        # We can estimate from GRM receipt or use a default
-        returned_weight = heat.grm_receipt.total_weight_kg if heat.grm_receipt and hasattr(heat.grm_receipt, 'total_weight_kg') else Decimal('0')
+        # We can estimate from GRN receipt or use a default
+        returned_weight = heat.grn_receipt.total_weight_kg if heat.grn_receipt and hasattr(heat.grn_receipt, 'total_weight_kg') else Decimal('0')
         
         returns_data.append({
             'id': f"RMSTORE-{heat.id}",
@@ -1303,7 +1303,7 @@ def get_rm_store_returns(request):
             },
             'heat_number_display': heat.heat_number,
             'heat_number_id': heat.id,
-            'grm_number': heat.grm_receipt.grm_number if heat.grm_receipt else None,
+            'grn_number': heat.grn_receipt.grn_number if heat.grn_receipt else None,
             'batch_id': 'N/A',
             'mo_id': 'N/A',
             'returned_from_location_display': 'RM Store',

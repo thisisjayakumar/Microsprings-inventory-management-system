@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
-from inventory.models import RawMaterial, GRMReceipt, HeatNumber
+from inventory.models import RawMaterial, GRNReceipt, HeatNumber
 from manufacturing.models import ManufacturingOrder, PurchaseOrder
 from third_party.models import Vendor
 from django.utils import timezone
@@ -81,9 +81,9 @@ class Command(BaseCommand):
         else:
             self.stdout.write(f'Purchase order already exists: {po.po_id}')
         
-        # Create test GRM receipt
-        grm, created = GRMReceipt.objects.get_or_create(
-            grm_number='TEST-GRM-001',
+        # Create test GRN receipt
+        grn, created = GRNReceipt.objects.get_or_create(
+            grn_number='TEST-GRN-001',
             defaults={
                 'purchase_order': po,
                 'truck_number': 'TN01AB1234',
@@ -97,9 +97,9 @@ class Command(BaseCommand):
         )
         
         if created:
-            self.stdout.write(f'Created GRM receipt: {grm.grm_number}')
+            self.stdout.write(f'Created GRN receipt: {grn.grn_number}')
         else:
-            self.stdout.write(f'GRM receipt already exists: {grm.grm_number}')
+            self.stdout.write(f'GRN receipt already exists: {grn.grn_number}')
         
         # Create test heat numbers with pending handover status
         heat_numbers_data = [
@@ -126,7 +126,7 @@ class Command(BaseCommand):
         for heat_data in heat_numbers_data:
             heat_number, created = HeatNumber.objects.get_or_create(
                 heat_number=heat_data['heat_number'],
-                grm_receipt=grm,
+                grn_receipt=grn,
                 raw_material=raw_material,
                 defaults={
                     'coils_received': heat_data['coils_received'],

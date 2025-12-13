@@ -36,7 +36,7 @@ from .serializers import (
     RMAllocationSwapSerializer, RMAllocationCheckSerializer
 )
 from products.models import Product
-from inventory.models import RawMaterial, RMStockBalance, GRMReceipt, HeatNumber
+from inventory.models import RawMaterial, RMStockBalance, GRNReceipt, HeatNumber
 from inventory.transaction_manager import InventoryTransactionManager
 from third_party.models import Vendor
 from processes.models import Process
@@ -1974,12 +1974,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         if new_status not in valid_statuses:
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if GRM is required for completing the PO
+        # Check if GRN is required for completing the PO
         if new_status == 'rm_completed':
-            grm_exists = GRMReceipt.objects.filter(purchase_order=po).exists()
-            if not grm_exists:
+            grn_exists = GRNReceipt.objects.filter(purchase_order=po).exists()
+            if not grn_exists:
                 return Response(
-                    {'error': 'Cannot complete PO without creating at least one GRM Receipt for RM'}, 
+                    {'error': 'Cannot complete PO without creating at least one GRN Receipt for RM'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -3842,7 +3842,7 @@ def get_available_heat_numbers_for_mo(request, mo_id):
         heat_numbers = HeatNumber.objects.filter(
             raw_material=material,
             is_available=True
-        ).select_related('grm_receipt', 'raw_material').order_by('-created_at')
+        ).select_related('grn_receipt', 'raw_material').order_by('-created_at')
         
         # Serialize heat number data with coil information
         heat_numbers_data = []
@@ -3861,7 +3861,7 @@ def get_available_heat_numbers_for_mo(request, mo_id):
                 heat_numbers_data.append({
                     'id': heat.id,
                     'heat_number': heat.heat_number,
-                    'grm_number': heat.grm_receipt.grm_number if heat.grm_receipt else None,
+                    'grn_number': heat.grn_receipt.grn_number if heat.grn_receipt else None,
                     'total_weight_kg': float(heat.total_weight_kg or 0),
                     'consumed_quantity_kg': float(heat.consumed_quantity_kg),
                     'available_quantity_kg': float(available_qty),

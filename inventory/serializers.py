@@ -5,14 +5,14 @@ from decimal import Decimal
 from products.models import Product
 from .models import (
     RMStockBalance, RawMaterial, InventoryTransaction, Location,
-    GRMReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
+    GRNReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
     HandoverIssue, RMReturn
 )
 
 
 class HeatNumberDetailSerializer(serializers.ModelSerializer):
     """Serializer for heat number details with coil/sheet information"""
-    grm_number = serializers.CharField(source='grm_receipt.grm_number', read_only=True)
+    grn_number = serializers.CharField(source='grn_receipt.grn_number', read_only=True)
     coils_received = serializers.IntegerField(read_only=True)
     sheets_received = serializers.IntegerField(read_only=True)
     total_weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
@@ -24,7 +24,7 @@ class HeatNumberDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = HeatNumber
         fields = [
-            'id', 'heat_number', 'grm_number', 'coils_received', 'sheets_received',
+            'id', 'heat_number', 'grn_number', 'coils_received', 'sheets_received',
             'total_weight_kg', 'available_quantity_kg', 'available_coils', 'available_sheets',
             'items', 'is_available', 'created_at'
         ]
@@ -375,24 +375,24 @@ class InventoryTransactionSerializer(serializers.ModelSerializer):
         return None
 
 
-# GRM and Heat Number Serializers
+# GRN and Heat Number Serializers
 
 class HeatNumberSerializer(serializers.ModelSerializer):
     """Serializer for Heat Number model"""
     raw_material_details = RawMaterialBasicSerializer(source='raw_material', read_only=True)
     available_quantity_kg = serializers.SerializerMethodField()
     available_coils = serializers.SerializerMethodField()
-    grm_number = serializers.CharField(source='grm_receipt.grm_number', read_only=True)
+    grn_number = serializers.CharField(source='grn_receipt.grn_number', read_only=True)
     
     class Meta:
         model = HeatNumber
         fields = [
-            'id', 'heat_number', 'grm_receipt', 'raw_material', 'raw_material_details',
+            'id', 'heat_number', 'grn_receipt', 'raw_material', 'raw_material_details',
             'coils_received', 'total_weight_kg', 'sheets_received', 'test_certificate_date',
             'items', 'is_available', 'consumed_quantity_kg', 'available_quantity_kg', 'available_coils',
-            'grm_number', 'created_at', 'updated_at'
+            'grn_number', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'grm_receipt', 'is_available', 'consumed_quantity_kg', 'created_at', 'updated_at', 'available_quantity_kg', 'available_coils']
+        read_only_fields = ['id', 'grn_receipt', 'is_available', 'consumed_quantity_kg', 'created_at', 'updated_at', 'available_quantity_kg', 'available_coils']
     
     def get_available_quantity_kg(self, obj):
         """Get remaining available quantity in KG"""
@@ -439,8 +439,8 @@ class HeatNumberSerializer(serializers.ModelSerializer):
         return data
 
 
-class GRMReceiptSerializer(serializers.ModelSerializer):
-    """Serializer for GRM Receipt model"""
+class GRNReceiptSerializer(serializers.ModelSerializer):
+    """Serializer for GRN Receipt model"""
     purchase_order_details = serializers.SerializerMethodField()
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
     quality_check_by_name = serializers.CharField(source='quality_check_by.get_full_name', read_only=True)
@@ -448,16 +448,16 @@ class GRMReceiptSerializer(serializers.ModelSerializer):
     completion_percentage = serializers.SerializerMethodField()
     
     class Meta:
-        model = GRMReceipt
+        model = GRNReceipt
         fields = [
-            'id', 'grm_number', 'purchase_order', 'purchase_order_details',
+            'id', 'grn_number', 'purchase_order', 'purchase_order_details',
             'truck_number', 'driver_name', 'receipt_date',
             'received_by', 'received_by_name', 'status', 'total_items_received',
             'total_items_expected', 'quality_check_passed',
             'quality_check_by', 'quality_check_by_name', 'quality_check_date',
             'heat_numbers', 'completion_percentage', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'grm_number', 'created_at', 'updated_at', 'completion_percentage']
+        read_only_fields = ['id', 'grn_number', 'created_at', 'updated_at', 'completion_percentage']
     
     def get_purchase_order_details(self, obj):
         """Get purchase order details"""
@@ -478,8 +478,8 @@ class GRMReceiptSerializer(serializers.ModelSerializer):
         return (obj.total_items_received / obj.total_items_expected) * 100
 
 
-class GRMReceiptListSerializer(serializers.ModelSerializer):
-    """Simplified serializer for GRM Receipt list view"""
+class GRNReceiptListSerializer(serializers.ModelSerializer):
+    """Simplified serializer for GRN Receipt list view"""
     po_id = serializers.CharField(source='purchase_order.po_id', read_only=True)
     vendor_name = serializers.CharField(source='purchase_order.vendor_name.name', read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
@@ -498,36 +498,36 @@ class GRMReceiptListSerializer(serializers.ModelSerializer):
     )
     
     class Meta:
-        model = GRMReceipt
+        model = GRNReceipt
         fields = [
-            'id', 'grm_number', 'po_id', 'vendor_name', 'truck_number',
+            'id', 'grn_number', 'po_id', 'vendor_name', 'truck_number',
             'driver_name', 'receipt_date', 'received_by_name', 'status',
             'status_display', 'quantity_ordered', 'quantity_received',
             'quality_check_passed', 'created_at'
         ]
 
 
-class GRMReceiptCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating GRM Receipt"""
+class GRNReceiptCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating GRN Receipt"""
     heat_numbers_data = HeatNumberSerializer(many=True, write_only=True)
     
     class Meta:
-        model = GRMReceipt
+        model = GRNReceipt
         fields = [
             'purchase_order', 'truck_number', 'driver_name', 'heat_numbers_data'
         ]
     
     def validate(self, data):
-        """Validate GRM receipt data"""
+        """Validate GRN receipt data"""
         purchase_order = data.get('purchase_order')
         heat_numbers_data = data.get('heat_numbers_data', [])
         
-        # Check if active GRM already exists for this PO (exclude cancelled)
-        if purchase_order and GRMReceipt.objects.filter(
+        # Check if active GRN already exists for this PO (exclude cancelled)
+        if purchase_order and GRNReceipt.objects.filter(
             purchase_order=purchase_order
         ).exclude(status='cancelled').exists():
             raise serializers.ValidationError({
-                'purchase_order': 'An active GRM receipt already exists for this Purchase Order'
+                'purchase_order': 'An active GRN receipt already exists for this Purchase Order'
             })
         
         # Validate heat numbers data
@@ -549,7 +549,7 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
         return data
     
     def create(self, validated_data):
-        """Create GRM receipt with heat numbers"""
+        """Create GRN receipt with heat numbers"""
         from decimal import Decimal
         from inventory.models import RMStockBalance
         
@@ -559,18 +559,18 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
         # Set received_by from context
         validated_data['received_by'] = self.context['request'].user
         
-        # Create GRM receipt
-        grm_receipt = GRMReceipt.objects.create(**validated_data)
+        # Create GRN receipt
+        grn_receipt = GRNReceipt.objects.create(**validated_data)
         
         # Update PO with received quantity
-        if quantity_received and grm_receipt.purchase_order:
-            grm_receipt.purchase_order.quantity_received = quantity_received
-            grm_receipt.purchase_order.save()
+        if quantity_received and grn_receipt.purchase_order:
+            grn_receipt.purchase_order.quantity_received = quantity_received
+            grn_receipt.purchase_order.save()
         
         # Create heat numbers and update stock balances
         for i, heat_data in enumerate(heat_numbers_data):
             try:
-                heat_number = HeatNumber.objects.create(grm_receipt=grm_receipt, **heat_data)
+                heat_number = HeatNumber.objects.create(grn_receipt=grn_receipt, **heat_data)
                 
                 # Update RMStockBalance available_quantity for this raw material
                 raw_material = heat_data.get('raw_material')
@@ -591,11 +591,11 @@ class GRMReceiptCreateSerializer(serializers.ModelSerializer):
                 raise e
         
         # Update completion status
-        grm_receipt.total_items_received = len(heat_numbers_data)
-        grm_receipt.total_items_expected = quantity_received or 0
-        grm_receipt.save()
+        grn_receipt.total_items_received = len(heat_numbers_data)
+        grn_receipt.total_items_expected = quantity_received or 0
+        grn_receipt.save()
         
-        return grm_receipt
+        return grn_receipt
 
 
 class RMStockBalanceHeatSerializer(serializers.ModelSerializer):
@@ -622,7 +622,7 @@ class RMStockBalanceHeatSerializer(serializers.ModelSerializer):
         return [
             {
                 'heat_number': heat.heat_number,
-                'grm_number': heat.grm_receipt.grm_number,
+                'grn_number': heat.grn_receipt.grn_number,
                 'available_quantity_kg': float(heat.get_available_quantity_kg()),
                 'coils_available': heat.get_available_coils(),
                 'created_at': heat.created_at
@@ -641,29 +641,29 @@ class InventoryTransactionHeatSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'inventory_transaction', 'transaction_details', 'heat_number',
             'heat_number_details', 'quantity_kg', 'coils_count', 'sheets_count',
-            'grm_number'
+            'grn_number'
         ]
         read_only_fields = ['id']
 
 
-class GRMReceiptListSerializer(serializers.ModelSerializer):
-    """Simplified serializer for GRM receipt list view"""
+class GRNReceiptListSerializer(serializers.ModelSerializer):
+    """Simplified serializer for GRN receipt list view"""
     purchase_order_po_id = serializers.CharField(source='purchase_order.po_id', read_only=True)
     vendor_name = serializers.CharField(source='purchase_order.vendor_name.name', read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
     heat_numbers_count = serializers.SerializerMethodField()
     
     class Meta:
-        model = GRMReceipt
+        model = GRNReceipt
         fields = [
-            'id', 'grm_number', 'purchase_order_po_id', 'vendor_name',
+            'id', 'grn_number', 'purchase_order_po_id', 'vendor_name',
             'truck_number', 'driver_name', 'status', 'total_items_received',
             'total_items_expected', 'received_by_name', 'receipt_date',
             'heat_numbers_count', 'quality_check_passed'
         ]
     
     def get_heat_numbers_count(self, obj):
-        """Get count of heat numbers in this GRM"""
+        """Get count of heat numbers in this GRN"""
         return obj.heat_numbers.count()
 
 
@@ -672,14 +672,14 @@ class GRMReceiptListSerializer(serializers.ModelSerializer):
 class HeatNumberHandoverSerializer(serializers.ModelSerializer):
     """Serializer for heat numbers pending handover verification"""
     raw_material_details = RawMaterialBasicSerializer(source='raw_material', read_only=True)
-    grm_number = serializers.CharField(source='grm_receipt.grm_number', read_only=True)
+    grn_number = serializers.CharField(source='grn_receipt.grn_number', read_only=True)
     handover_status_display = serializers.CharField(source='get_handover_status_display', read_only=True)
     verified_by_name = serializers.CharField(source='verified_by.get_full_name', read_only=True)
     
     class Meta:
         model = HeatNumber
         fields = [
-            'id', 'heat_number', 'grm_number', 'raw_material', 'raw_material_details',
+            'id', 'heat_number', 'grn_number', 'raw_material', 'raw_material_details',
             'total_weight_kg', 'coils_received', 'sheets_received', 'handover_status',
             'handover_status_display', 'verified_at', 'verified_by', 'verified_by_name',
             'created_at'
@@ -1021,7 +1021,7 @@ class HeatNumberWithCoilsSerializer(serializers.Serializer):
     """Serializer for heat number with its coils"""
     id = serializers.IntegerField()
     heat_number = serializers.CharField()
-    grm_number = serializers.CharField(source='grm_receipt.grm_number')
+    grn_number = serializers.CharField(source='grn_receipt.grn_number')
     total_weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3)
     coils_received = serializers.IntegerField()
     available_quantity_kg = serializers.SerializerMethodField()

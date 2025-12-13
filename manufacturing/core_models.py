@@ -668,7 +668,7 @@ class PurchaseOrder(models.Model):
     quantity_received = models.DecimalField(
         max_digits=10, decimal_places=2,
         null=True, blank=True,
-        help_text="Actual quantity received (set when GRM is created)"
+        help_text="Actual quantity received (set when GRN is created)"
     )
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -791,7 +791,7 @@ class POTransactionHistory(models.Model):
     Tracks all PO-related events including creation, approval, receipt, etc.
     """
     po = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name='transaction_history')
-    transaction_type = models.CharField(max_length=50, help_text="Type of transaction (po_created, po_approved, grm_received, etc.)")
+    transaction_type = models.CharField(max_length=50, help_text="Type of transaction (po_created, po_approved, grn_received, etc.)")
     transaction_id = models.CharField(max_length=50, unique=True, help_text="Unique transaction identifier")
     description = models.TextField(help_text="Human-readable description of the transaction")
     details = models.JSONField(default=dict, help_text="Detailed transaction data (quantities, amounts, etc.)")

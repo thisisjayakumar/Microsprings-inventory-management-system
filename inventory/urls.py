@@ -11,8 +11,8 @@ router.register(r'stock-balances', views.RMStockBalanceViewSet, basename='stock-
 router.register(r'raw-materials', views.RawMaterialViewSet, basename='raw-material')
 router.register(r'transactions', views.InventoryTransactionViewSet, basename='inventory-transaction')
 
-# GRM and Heat Number endpoints
-router.register(r'grm-receipts', views.GRMReceiptViewSet, basename='grm-receipt')
+# GRN and Heat Number endpoints
+router.register(r'grn-receipts', views.GRNReceiptViewSet, basename='grn-receipt')
 router.register(r'heat-numbers', views.HeatNumberViewSet, basename='heat-number')
 router.register(r'stock-balances-heat', views.RMStockBalanceHeatViewSet, basename='stock-balance-heat')
 router.register(r'transactions-heat', views.InventoryTransactionHeatViewSet, basename='inventory-transaction-heat')

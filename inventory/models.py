@@ -3,7 +3,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from utils.enums import (
     MaterialTypeChoices, FinishingChoices, LocationTypeChoices,
-    TransactionTypeChoices, ReferenceTypeChoices, GRMStatusChoices,
+    TransactionTypeChoices, ReferenceTypeChoices, GRNStatusChoices,
     HandoverStatusChoices, HandoverIssueTypeChoices, RMReturnDispositionChoices,
     RMReturnReasonChoices
 )
@@ -263,20 +263,20 @@ class RMStockBalance(models.Model):
         return f"{self.raw_material.material_code} - {self.available_quantity}"
 
 
-class GRMReceipt(models.Model):
+class GRNReceipt(models.Model):
     """
-    Goods Receipt Material (GRM) - Represents a truck delivery/consignment
-    Each GRM can contain multiple raw materials with different heat numbers
+    Goods Received Note (GRN) - Represents a truck delivery/consignment
+    Each GRN can contain multiple raw materials with different heat numbers
     """
-    # Auto-generated GRM number
-    grm_number = models.CharField(max_length=20, unique=True, editable=False)
+    # Auto-generated GRN number
+    grn_number = models.CharField(max_length=20, unique=True, editable=False)
     
     # Related Purchase Order
     purchase_order = models.ForeignKey(
         'manufacturing.PurchaseOrder', 
         on_delete=models.PROTECT, 
-        related_name='grm_receipts',
-        help_text="Purchase Order this GRM is for"
+        related_name='grn_receipts',
+        help_text="Purchase Order this GRN is for"
     )
     
     # Delivery Information
@@ -285,10 +285,10 @@ class GRMReceipt(models.Model):
     
     # Receipt Details
     receipt_date = models.DateTimeField(auto_now_add=True)
-    received_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='grm_receipts')
+    received_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='grn_receipts')
     
     # Status and Tracking
-    status = models.CharField(max_length=20, choices=GRMStatusChoices.choices, default='pending')
+    status = models.CharField(max_length=20, choices=GRNStatusChoices.choices, default='pending')
     total_items_received = models.DecimalField(
         max_digits=10, decimal_places=2, default=0,
         help_text="Total items/weight received (in kg for weight-based, count for count-based)"
@@ -302,7 +302,7 @@ class GRMReceipt(models.Model):
     quality_check_passed = models.BooleanField(default=False)
     quality_check_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name='quality_checked_grms'
+        related_name='quality_checked_grns'
     )
     quality_check_date = models.DateTimeField(null=True, blank=True)
     
@@ -312,33 +312,33 @@ class GRMReceipt(models.Model):
     
     class Meta:
         ordering = ['-receipt_date']
-        verbose_name = 'GRM Receipt'
-        verbose_name_plural = 'GRM Receipts'
+        verbose_name = 'GRN Receipt'
+        verbose_name_plural = 'GRN Receipts'
         indexes = [
-            models.Index(fields=['grm_number']),
+            models.Index(fields=['grn_number']),
             models.Index(fields=['receipt_date']),
             models.Index(fields=['status']),
         ]
     
     def __str__(self):
-        return f"GRM-{self.grm_number} - {self.purchase_order.po_id}"
+        return f"GRN-{self.grn_number} - {self.purchase_order.po_id}"
     
     def save(self, *args, **kwargs):
-        if not self.grm_number:
-            # Generate GRM number: GRM-YYYYMMDD-XXXX
+        if not self.grn_number:
+            # Generate GRN number: GRN-YYYYMMDD-XXXX
             from django.utils import timezone
             date_str = timezone.now().strftime('%Y%m%d')
-            last_grm = GRMReceipt.objects.filter(
-                grm_number__startswith=f'GRM-{date_str}'
-            ).order_by('-grm_number').first()
+            last_grn = GRNReceipt.objects.filter(
+                grn_number__startswith=f'GRN-{date_str}'
+            ).order_by('-grn_number').first()
             
-            if last_grm:
-                last_num = int(last_grm.grm_number.split('-')[-1])
+            if last_grn:
+                last_num = int(last_grn.grn_number.split('-')[-1])
                 new_num = last_num + 1
             else:
                 new_num = 1
             
-            self.grm_number = f'GRM-{date_str}-{new_num:04d}'
+            self.grn_number = f'GRN-{date_str}-{new_num:04d}'
         
         super().save(*args, **kwargs)
     
@@ -357,15 +357,15 @@ class GRMReceipt(models.Model):
 
 class HeatNumber(models.Model):
     """
-    Heat Number - Represents a specific batch/lot of raw material within a GRM
+    Heat Number - Represents a specific batch/lot of raw material within a GRN
     Each heat number contains specific quantities and specifications
     """
     # Heat number identifier
     heat_number = models.CharField(max_length=50, help_text="Heat number from supplier")
     
-    # Related GRM and Raw Material
-    grm_receipt = models.ForeignKey(
-        GRMReceipt, 
+    # Related GRN and Raw Material
+    grn_receipt = models.ForeignKey(
+        GRNReceipt, 
         on_delete=models.CASCADE, 
         related_name='heat_numbers'
     )
@@ -435,13 +435,13 @@ class HeatNumber(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        unique_together = ['heat_number', 'grm_receipt', 'raw_material']
+        unique_together = ['heat_number', 'grn_receipt', 'raw_material']
         ordering = ['-created_at']
         verbose_name = 'Heat Number'
         verbose_name_plural = 'Heat Numbers'
         indexes = [
             models.Index(fields=['heat_number']),
-            models.Index(fields=['grm_receipt', 'raw_material']),
+            models.Index(fields=['grn_receipt', 'raw_material']),
             models.Index(fields=['is_available']),
         ]
     
@@ -618,9 +618,9 @@ class InventoryTransactionHeat(models.Model):
     )
     
     # Traceability
-    grm_number = models.CharField(
+    grn_number = models.CharField(
         max_length=20,
-        help_text="GRM number for traceability"
+        help_text="GRN number for traceability"
     )
     
     class Meta:
@@ -628,7 +628,7 @@ class InventoryTransactionHeat(models.Model):
         verbose_name_plural = 'Inventory Transactions Heat'
         indexes = [
             models.Index(fields=['heat_number']),
-            models.Index(fields=['grm_number']),
+            models.Index(fields=['grn_number']),
         ]
     
     def __str__(self):

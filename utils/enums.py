@@ -94,7 +94,7 @@ class ReferenceTypeChoices(models.TextChoices):
     RM_RETURN = 'rm_return', _('RM Return to Vendor')
 
 
-class GRMStatusChoices(models.TextChoices):
+class GRNStatusChoices(models.TextChoices):
     PENDING = 'pending', _('Pending Receipt')
     PARTIAL = 'partial', _('Partially Received')
     COMPLETED = 'completed', _('Completed')

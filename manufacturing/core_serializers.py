@@ -569,7 +569,7 @@ class PurchaseOrderStatusSerializer(serializers.ModelSerializer):
 
 
 class RawMaterialMinimalSerializer(serializers.ModelSerializer):
-    """Minimal raw material serializer for nested PO relationships - only fields needed for GRM creation"""
+    """Minimal raw material serializer for nested PO relationships - only fields needed for GRN creation"""
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     
     class Meta:
@@ -586,8 +586,8 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
     material_code = serializers.SerializerMethodField()
     vendor_name_display = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    rm_code = RawMaterialMinimalSerializer(read_only=True)  # Include nested rm_code for GRM creation
-    vendor_name = VendorBasicSerializer(read_only=True)  # Include nested vendor_name for GRM creation
+    rm_code = RawMaterialMinimalSerializer(read_only=True)  # Include nested rm_code for GRN creation
+    vendor_name = VendorBasicSerializer(read_only=True)  # Include nested vendor_name for GRN creation
     
     def get_material_name(self, obj):
         """Get material name"""

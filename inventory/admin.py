@@ -4,7 +4,7 @@ from django.db import models
 from django.forms import TextInput, Textarea
 from .models import (
     RawMaterial, Location, InventoryTransaction, RMStockBalance,
-    GRMReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
+    GRNReceipt, HeatNumber, RMStockBalanceHeat, InventoryTransactionHeat,
     HandoverIssue, RMReturn
 )
 
@@ -196,22 +196,22 @@ class HeatNumberInline(admin.TabularInline):
     readonly_fields = ('created_at', 'updated_at')
 
 
-@admin.register(GRMReceipt)
-class GRMReceiptAdmin(admin.ModelAdmin):
+@admin.register(GRNReceipt)
+class GRNReceiptAdmin(admin.ModelAdmin):
     list_display = (
-        'grm_number', 'purchase_order', 'truck_number', 'driver_name', 
+        'grn_number', 'purchase_order', 'truck_number', 'driver_name', 
         'status', 'total_items_received', 'total_items_expected', 'receipt_date'
     )
     list_filter = ('status', 'receipt_date', 'quality_check_passed', 'received_by')
-    search_fields = ('grm_number', 'purchase_order__po_id', 'truck_number', 'driver_name')
+    search_fields = ('grn_number', 'purchase_order__po_id', 'truck_number', 'driver_name')
     ordering = ('-receipt_date',)
-    readonly_fields = ('grm_number', 'created_at', 'updated_at')
+    readonly_fields = ('grn_number', 'created_at', 'updated_at')
     date_hierarchy = 'receipt_date'
     inlines = [HeatNumberInline]
     
     fieldsets = (
-        ('GRM Information', {
-            'fields': ('grm_number', 'purchase_order', 'status')
+        ('GRN Information', {
+            'fields': ('grn_number', 'purchase_order', 'status')
         }),
         ('Delivery Details', {
             'fields': ('truck_number', 'driver_name', 'driver_contact', 'receipt_date', 'received_by')
@@ -243,19 +243,19 @@ class GRMReceiptAdmin(admin.ModelAdmin):
 @admin.register(HeatNumber)
 class HeatNumberAdmin(admin.ModelAdmin):
     list_display = (
-        'heat_number', 'grm_receipt', 'raw_material', 'total_weight_kg', 
+        'heat_number', 'grn_receipt', 'raw_material', 'total_weight_kg', 
         'coils_received', 'sheets_received', 'is_available', 'handover_status',
         'get_available_quantity'
     )
-    list_filter = ('is_available', 'raw_material__material_type', 'grm_receipt__status', 'created_at')
-    search_fields = ('heat_number', 'raw_material__material_code', 'grm_receipt__grm_number')
+    list_filter = ('is_available', 'raw_material__material_type', 'grn_receipt__status', 'created_at')
+    search_fields = ('heat_number', 'raw_material__material_code', 'grn_receipt__grn_number')
     ordering = ('-created_at',)
     readonly_fields = ('created_at', 'updated_at')
-    raw_id_fields = ('grm_receipt', 'raw_material')
+    raw_id_fields = ('grn_receipt', 'raw_material')
     
     fieldsets = (
         ('Heat Number Details', {
-            'fields': ('heat_number', 'grm_receipt', 'raw_material')
+            'fields': ('heat_number', 'grn_receipt', 'raw_material')
         }),
         ('Quantities', {
             'fields': ('coils_received', 'total_weight_kg', 'sheets_received', 'consumed_quantity_kg')
@@ -304,7 +304,7 @@ class HeatNumberAdmin(admin.ModelAdmin):
     
     def get_queryset(self, request):
         return super().get_queryset(request).select_related(
-            'grm_receipt', 'raw_material'
+            'grn_receipt', 'raw_material'
         )
 
 
@@ -343,17 +343,17 @@ class RMStockBalanceHeatAdmin(admin.ModelAdmin):
 @admin.register(InventoryTransactionHeat)
 class InventoryTransactionHeatAdmin(admin.ModelAdmin):
     list_display = (
-        'inventory_transaction', 'heat_number', 'grm_number', 'quantity_kg', 
+        'inventory_transaction', 'heat_number', 'grn_number', 'quantity_kg', 
         'coils_count', 'sheets_count'
     )
-    list_filter = ('grm_number', 'heat_number__raw_material__material_type')
-    search_fields = ('grm_number', 'heat_number__heat_number', 'inventory_transaction__transaction_id')
+    list_filter = ('grn_number', 'heat_number__raw_material__material_type')
+    search_fields = ('grn_number', 'heat_number__heat_number', 'inventory_transaction__transaction_id')
     ordering = ('-inventory_transaction__transaction_datetime',)
     raw_id_fields = ('inventory_transaction', 'heat_number')
     
     fieldsets = (
         ('Transaction Link', {
-            'fields': ('inventory_transaction', 'heat_number', 'grm_number')
+            'fields': ('inventory_transaction', 'heat_number', 'grn_number')
         }),
         ('Quantities', {
             'fields': ('quantity_kg', 'coils_count', 'sheets_count')
