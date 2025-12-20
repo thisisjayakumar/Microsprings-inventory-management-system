@@ -1,74 +1,69 @@
-# Multi-stage build for optimized Django production image
-# Stage 1: Builder - Install dependencies and build
-FROM python:3.12-alpine AS builder
+# ========================================
+# Base Image - Python 3.12 on Debian
+# ========================================
+FROM python:3.12-slim
 
+# ========================================
+# Environment Variables
+# ========================================
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install build dependencies
-RUN apk add --no-cache --virtual .build-deps \
+# ========================================
+# Install System Dependencies
+# ========================================
+RUN apt-get update && apt-get install -y \
+    # MySQL client libraries
+    default-libmysqlclient-dev \
+    # Build tools for Python packages
     gcc \
-    musl-dev \
-    mariadb-dev \
-    linux-headers \
-    libffi-dev \
-    openssl-dev \
-    jpeg-dev \
-    zlib-dev \
-    && apk add --no-cache \
-    mariadb-connector-c \
-    jpeg \
-    zlib
+    pkg-config \
+    # Image processing libraries (for Pillow)
+    libjpeg-dev \
+    zlib1g-dev \
+    # Cleanup to reduce image size
+    && rm -rf /var/lib/apt/lists/*
 
+# ========================================
+# Set Working Directory
+# ========================================
 WORKDIR /app
 
-# Copy requirements first for better layer caching
+# ========================================
+# Install Python Dependencies
+# ========================================
+# Copy requirements first (for better caching)
 COPY requirements.txt .
 
-# Install Python dependencies to a separate directory
+# Install Python packages
 RUN pip install --upgrade pip setuptools wheel && \
-    pip install --prefix=/install --no-warn-script-location -r requirements.txt && \
-    find /install -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
-    find /install -type f -name "*.pyc" -delete && \
-    find /install -type f -name "*.pyo" -delete
+    pip install -r requirements.txt
 
-# Copy application code
+# ========================================
+# Copy Application Code
+# ========================================
 COPY . .
 
-# Collect static files (needed before distroless stage)
-RUN DJANGO_SETTINGS_MODULE=microsprings_inventory_system.docker_settings \
-    python manage.py collectstatic --noinput --clear || true
+# ========================================
+# Create Necessary Directories
+# ========================================
+RUN mkdir -p /app/logs /app/media /app/staticfiles
 
-# Stage 2: Production - Use distroless for minimal attack surface
-FROM gcr.io/distroless/python3-debian12:nonroot
+# ========================================
+# Collect Static Files
+# ========================================
+# This collects all Django admin and app static files
+RUN python manage.py collectstatic --noinput --clear || true
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app:/install/lib/python3.12/site-packages \
-    DJANGO_SETTINGS_MODULE=microsprings_inventory_system.docker_settings \
-    PORT=8000
-
-WORKDIR /app
-
-# Copy Python dependencies from builder
-COPY --from=builder --chown=nonroot:nonroot /install /install
-
-# Copy application code
-COPY --from=builder --chown=nonroot:nonroot /app /app
-
-# Copy collected static files
-COPY --from=builder --chown=nonroot:nonroot /app/staticfiles /app/staticfiles
-
-# Copy entrypoint script
-COPY --from=builder --chown=nonroot:nonroot /app/entrypoint.py /app/entrypoint.py
-
-# Create necessary directories (using Python since distroless has no shell)
-# Note: We'll create these in entrypoint.py instead since distroless has no RUN command with shell
-
-# Expose port
+# ========================================
+# Expose Port
+# ========================================
 EXPOSE 8000
 
-# Use Python entrypoint script (distroless doesn't have shell, so we use Python directly)
-CMD ["python", "/app/entrypoint.py"]
+# ========================================
+# Run Application
+# ========================================
+# Use Django development server for now (simpler for learning)
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

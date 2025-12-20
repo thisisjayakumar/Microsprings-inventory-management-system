@@ -732,7 +732,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         bom_items = BOM.objects.filter(
             product_code=mo.product_code.product_code,
             is_active=True
-        ).select_related('process_step__process')
+        ).select_related('process_step__process', 'process_step__subprocess')
         
         if not bom_items.exists():
             return Response(
@@ -740,11 +740,41 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get unique processes (avoid duplicates)
+        # Filter out outsourced processes - supervisors should not see these
+        # A process is considered outsourced if ALL its ProcessSteps are outsourced
+        # We'll only create MOProcessExecution for processes that have at least one non-outsourced step
+        process_step_counts = {}
+        process_outsourced_counts = {}
+        
+        for bom_item in bom_items:
+            process = bom_item.process_step.process
+            process_id = process.id
+            
+            if process_id not in process_step_counts:
+                process_step_counts[process_id] = 0
+                process_outsourced_counts[process_id] = 0
+            
+            process_step_counts[process_id] += 1
+            if bom_item.is_outsourced:
+                process_outsourced_counts[process_id] += 1
+        
+        # Only include processes where at least one step is NOT outsourced
+        non_outsourced_process_ids = [
+            pid for pid in process_step_counts.keys()
+            if process_outsourced_counts[pid] < process_step_counts[pid]
+        ]
+        
+        if not non_outsourced_process_ids:
+            return Response(
+                {'error': 'No internal processes found for this product (all processes are outsourced)'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get unique processes (avoid duplicates) from non-outsourced processes
         unique_processes = {}
         for bom_item in bom_items:
             process = bom_item.process_step.process
-            if process.id not in unique_processes:
+            if process.id in non_outsourced_process_ids and process.id not in unique_processes:
                 unique_processes[process.id] = process
         
         # Create process executions
@@ -1376,25 +1406,61 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 is_active=True
             ).first()
             
+            # Filter out outsourced processes from process executions
+            # A process is considered outsourced if ALL its ProcessSteps are outsourced
+            from processes.models import ProcessStep
+            from django.db.models import Count, Q
+            
+            # Get processes where ALL steps are outsourced
+            processes_with_steps = ProcessStep.objects.values('process_id').annotate(
+                total_steps=Count('id'),
+                outsourced_steps=Count('id', filter=Q(subprocess__is_outsourced=True))
+            ).filter(total_steps__gt=0)
+            
+            # Process is outsourced if all steps are outsourced
+            fully_outsourced_process_ids = [
+                p['process_id'] for p in processes_with_steps
+                if p['outsourced_steps'] == p['total_steps'] and p['total_steps'] > 0
+            ]
+            
             if process_supervisor:
-                # Filter MOs with processes this supervisor handles
+                # Filter MOs with processes this supervisor handles (excluding fully outsourced)
                 assigned_mos = self.get_queryset().filter(
                     Q(process_executions__assigned_supervisor=request.user) | 
                     Q(process_executions__process__name__in=process_supervisor.process_names),
                     status__in=['gm_approved', 'mo_approved', 'rm_allocated', 'in_progress', 'on_hold']
+                ).exclude(
+                    process_executions__process_id__in=fully_outsourced_process_ids
                 ).distinct().order_by('-created_at')
             else:
-                # If no process supervisor record, only show MOs with assigned process executions
+                # If no process supervisor record, only show MOs with assigned process executions (excluding fully outsourced)
                 assigned_mos = self.get_queryset().filter(
                     process_executions__assigned_supervisor=request.user,
                     status__in=['gm_approved', 'mo_approved', 'rm_allocated', 'in_progress', 'on_hold']
+                ).exclude(
+                    process_executions__process_id__in=fully_outsourced_process_ids
                 ).distinct().order_by('-created_at')
                 
         except Exception as e:
-            # If there's an error, only show MOs with assigned process executions
+            # If there's an error, only show MOs with assigned process executions (excluding fully outsourced)
+            from processes.models import ProcessStep
+            from django.db.models import Count, Q
+            
+            processes_with_steps = ProcessStep.objects.values('process_id').annotate(
+                total_steps=Count('id'),
+                outsourced_steps=Count('id', filter=Q(subprocess__is_outsourced=True))
+            ).filter(total_steps__gt=0)
+            
+            fully_outsourced_process_ids = [
+                p['process_id'] for p in processes_with_steps
+                if p['outsourced_steps'] == p['total_steps'] and p['total_steps'] > 0
+            ]
+            
             assigned_mos = self.get_queryset().filter(
                 process_executions__assigned_supervisor=request.user,
                 status__in=['gm_approved', 'mo_approved', 'rm_allocated', 'in_progress', 'on_hold']
+            ).exclude(
+                process_executions__process_id__in=fully_outsourced_process_ids
             ).distinct().order_by('-created_at')
         
         # Separate by status
@@ -2346,9 +2412,27 @@ class MOProcessExecutionViewSet(viewsets.ModelViewSet):
         if any(role in ['admin', 'manager', 'production_head'] for role in user_roles):
             return queryset
         
-        # Updated requirement: ANY supervisor can see ALL processes (no filtering)
+        # Supervisors should not see outsourced processes
         if 'supervisor' in user_roles:
-            return queryset  # Supervisors can see all processes
+            # Filter out process executions where ALL ProcessSteps are outsourced
+            # A process is considered outsourced if ALL its ProcessSteps have outsourced subprocesses
+            from processes.models import ProcessStep
+            from django.db.models import Count, Q
+            
+            # Get processes where ALL steps are outsourced
+            processes_with_steps = ProcessStep.objects.values('process_id').annotate(
+                total_steps=Count('id'),
+                outsourced_steps=Count('id', filter=Q(subprocess__is_outsourced=True))
+            ).filter(total_steps__gt=0)
+            
+            # Process is outsourced if all steps are outsourced
+            fully_outsourced_process_ids = [
+                p['process_id'] for p in processes_with_steps
+                if p['outsourced_steps'] == p['total_steps'] and p['total_steps'] > 0
+            ]
+            
+            queryset = queryset.exclude(process_id__in=fully_outsourced_process_ids)
+            return queryset
         
         # RM Store and FG Store users can only see processes assigned to them
         elif any(role in ['rm_store', 'fg_store'] for role in user_roles):

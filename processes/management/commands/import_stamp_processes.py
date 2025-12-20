@@ -236,9 +236,15 @@ class Command(BaseCommand):
                                 )
 
                                 # Create or get subprocess
+                                # Note: If import_process_config was run first, this will use existing
+                                # SubProcess with outsourcing/optional flags already set
                                 subprocess, _ = SubProcess.objects.get_or_create(
                                     process=process,
-                                    name=subprocess_name
+                                    name=subprocess_name,
+                                    defaults={
+                                        'is_outsourced': False,
+                                        'is_optional': False
+                                    }
                                 )
 
                                 # Create process step

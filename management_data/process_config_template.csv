@@ -1,0 +1,38 @@
+Parent_Process_Name,Process_Name,Out_Sourcing Process,Optional Process
+Coiling,,False,False
+Forming,,False,False
+Upbend,,False,True
+Stress Relieving,,False,False
+Coating,Nylon Coating,False,False
+Coating,PVC Coating,False,False
+Coating,Powder Coating Pastel Blue,True,False
+Coating,Blue Coating,False,False
+Coating,Blackening,True,False
+Plating,Zinc Blue,True,False
+Plating,Zinc White,True,False
+Plating,Zinc Yellow,True,False
+Plating,Olive Green,True,False
+Plating,Zinc Nickel,True,False
+Plating,Nickel,True,False
+Plating,Phosphating,False,False
+Blanking,Blanking & Piercing,False,False
+Piercing,Piercing,False,False
+Piercing,Piercing 1,False,False
+Piercing,Piercing 2,False,False
+Piercing,Slot Piercing,False,False
+Piercing,Piercing & Parting,False,False
+Piercing,Piercing & Parting & Bending,False,False
+Piercing,1.6mm Piercing,False,False
+Deburring,,False,False
+Ironing,,False,False
+Champering,,False,False
+Bending,Bending,False,False
+Bending,Bending 1,False,False
+Bending,Bending 2,False,False
+Bush Assembly,,False,False
+Riveting,,False,False
+Remar,,False,False
+Brass Welding,,True,False
+Grinding & Buffing,,False,False
+Grinding,,False,False
+Blacking,,False,False

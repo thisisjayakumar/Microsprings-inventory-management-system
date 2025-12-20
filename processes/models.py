@@ -29,10 +29,23 @@ class SubProcess(models.Model):
     process = models.ForeignKey(Process, on_delete=models.CASCADE, related_name='subprocesses')
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
+    
+    # Outsourcing and Optional flags
+    is_outsourced = models.BooleanField(
+        default=False,
+        help_text="Whether this subprocess is outsourced (not handled by internal supervisors)"
+    )
+    is_optional = models.BooleanField(
+        default=False,
+        help_text="Whether this subprocess is optional (can be skipped)"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['process', 'name']
+        unique_together = [['process', 'name']]  # Ensure unique subprocess per process
 
     def __str__(self):
         return f"{self.process.name} -> {self.name}"
@@ -74,6 +87,20 @@ class ProcessStep(models.Model):
         if self.subprocess:
             return f"{self.process.name} -> {self.subprocess.name} -> {self.step_name}"
         return f"{self.process.name} -> {self.step_name}"
+    
+    @property
+    def is_outsourced(self):
+        """Check if this process step is outsourced via its subprocess"""
+        if self.subprocess:
+            return self.subprocess.is_outsourced
+        return False
+    
+    @property
+    def is_optional(self):
+        """Check if this process step is optional via its subprocess"""
+        if self.subprocess:
+            return self.subprocess.is_optional
+        return False
 
 
 class BOM(models.Model):
@@ -155,6 +182,16 @@ class BOM(models.Model):
     @property
     def subprocess(self):
         return self.process_step.subprocess
+    
+    @property
+    def is_outsourced(self):
+        """Check if this BOM entry is for an outsourced process"""
+        return self.process_step.is_outsourced
+    
+    @property
+    def is_optional(self):
+        """Check if this BOM entry is for an optional process"""
+        return self.process_step.is_optional
     
     @property
     def sheet_area(self):
