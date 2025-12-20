@@ -187,17 +187,17 @@ class Command(BaseCommand):
                                 defaults={
                                     'product_type': mapped_product_type,
                                     'material': material,
-                                    'customer': customer,
-                                    'weight_per_piece': grams_value,
-                                    'is_active': True,
-                                    # Store dimensions in a JSON field or use appropriate fields
-                                    'sheet_length': self.safe_decimal(sheet_length, row_num, 'sheet_length'),
-                                    'sheet_breadth': self.safe_decimal(sheet_breadth, row_num, 'sheet_breadth'),
-                                    'strip_length': self.safe_decimal(strip_length, row_num, 'strip_length'),
-                                    'strip_breadth': self.safe_decimal(strip_breadth, row_num, 'strip_breadth'),
-                                    'strip_count': self.safe_int(strip_count, row_num, 'strip_count'),
+                                    'customer_c_id': customer,
+                                    'grams_per_product': grams_value,
+                                    # Sheet dimensions (whole sheet size)
+                                    'whole_sheet_length_mm': self.safe_decimal(sheet_length, row_num, 'whole_sheet_length_mm'),
+                                    'whole_sheet_breadth_mm': self.safe_decimal(sheet_breadth, row_num, 'whole_sheet_breadth_mm'),
+                                    # Strip dimensions (cut size from sheet)
+                                    'strip_length_mm': self.safe_decimal(strip_length, row_num, 'strip_length_mm'),
+                                    'strip_breadth_mm': self.safe_decimal(strip_breadth, row_num, 'strip_breadth_mm'),
+                                    # Strip and piece counts
+                                    'strips_per_sheet': self.safe_int(strip_count, row_num, 'strips_per_sheet'),
                                     'pcs_per_strip': self.safe_int(pcs_per_strip, row_num, 'pcs_per_strip'),
-                                    'pcs_per_sheet': self.safe_int(pcs_per_sheet, row_num, 'pcs_per_sheet'),
                                 }
                             )
                             
@@ -223,22 +223,47 @@ class Command(BaseCommand):
                                 "Process 5", "Process 6", "Process 7"
                             ]
                             
-                            sequence = 1
+                            # Collect all non-empty subprocess names
+                            subprocess_names = []
                             for process_col in process_columns:
                                 subprocess_name = row.get(process_col, "").strip()
-                                if not subprocess_name:
-                                    continue
-
-                                # Create or get process
-                                process, _ = Process.objects.get_or_create(
-                                    name=process_col,
-                                    defaults={"code": abs(hash(process_col)) % 10000}
+                                if subprocess_name:
+                                    subprocess_names.append(subprocess_name)
+                            
+                            if not subprocess_names:
+                                self.stdout.write(
+                                    self.style.WARNING(
+                                        f"    No processes found for {product_code}. Skipping BOM creation."
+                                    )
                                 )
-
+                                continue
+                            
+                            # Use the first subprocess name as the main Process name
+                            main_process_name = subprocess_names[0]
+                            
+                            self.stdout.write(
+                                f"    Main Process: {main_process_name}, SubProcesses: {subprocess_names}"
+                            )
+                            
+                            # Create or get the main Process (using first subprocess name)
+                            process, process_created = Process.objects.get_or_create(
+                                name=main_process_name,
+                                defaults={"code": abs(hash(main_process_name)) % 10000}
+                            )
+                            
+                            if process_created:
+                                self.stdout.write(f"    ✓ Created Process: {main_process_name}")
+                            else:
+                                self.stdout.write(f"    ✓ Using existing Process: {main_process_name}")
+                            
+                            # Create all SubProcesses under the same Process
+                            # First subprocess has the same name as the Process
+                            sequence = 1
+                            for subprocess_name in subprocess_names:
                                 # Create or get subprocess
                                 # Note: If import_process_config was run first, this will use existing
                                 # SubProcess with outsourcing/optional flags already set
-                                subprocess, _ = SubProcess.objects.get_or_create(
+                                subprocess, subprocess_created = SubProcess.objects.get_or_create(
                                     process=process,
                                     name=subprocess_name,
                                     defaults={
@@ -246,9 +271,18 @@ class Command(BaseCommand):
                                         'is_optional': False
                                     }
                                 )
+                                
+                                if subprocess_created:
+                                    self.stdout.write(
+                                        f"    ✓ Created SubProcess: {subprocess_name} (seq: {sequence})"
+                                    )
+                                else:
+                                    self.stdout.write(
+                                        f"    ✓ Using existing SubProcess: {subprocess_name} (seq: {sequence})"
+                                    )
 
-                                # Create process step
-                                step_code = f"{product_code}-{process_col}-{sequence}"
+                                # Create or update process step
+                                step_code = f"{product_code}-{sequence}"
                                 step, step_created = ProcessStep.objects.update_or_create(
                                     step_code=step_code,
                                     defaults={
@@ -258,8 +292,17 @@ class Command(BaseCommand):
                                         "sequence_order": sequence,
                                     }
                                 )
+                                
+                                if step_created:
+                                    self.stdout.write(
+                                        f"    ✓ Created ProcessStep: {subprocess_name} (seq: {sequence})"
+                                    )
+                                else:
+                                    self.stdout.write(
+                                        f"    ✓ Updated ProcessStep: {subprocess_name} (seq: {sequence})"
+                                    )
 
-                                # Create BOM entry with sheet/strip dimensions
+                                # Create or update BOM entry with sheet/strip dimensions
                                 bom, bom_created = BOM.objects.update_or_create(
                                     product_code=product_code,
                                     process_step=step,
@@ -280,12 +323,12 @@ class Command(BaseCommand):
                                 if bom_created:
                                     created_boms += 1
                                     self.stdout.write(
-                                        f"    ✓ Created BOM for step: {process_col} -> {subprocess_name} (seq: {sequence})"
+                                        f"    ✓ Created BOM for: {main_process_name} -> {subprocess_name} (seq: {sequence})"
                                     )
                                 else:
                                     updated_boms += 1
                                     self.stdout.write(
-                                        f"    ✓ Updated BOM for step: {process_col} -> {subprocess_name} (seq: {sequence})"
+                                        f"    ✓ Updated BOM for: {main_process_name} -> {subprocess_name} (seq: {sequence})"
                                     )
 
                                 sequence += 1
