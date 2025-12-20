@@ -12,7 +12,7 @@ from .models import (
 
 class HeatNumberDetailSerializer(serializers.ModelSerializer):
     """Serializer for heat number details with coil/sheet information"""
-    grm_number = serializers.CharField(source='grm_receipt.grm_number', read_only=True)
+    grm_number = serializers.SerializerMethodField()
     coils_received = serializers.IntegerField(read_only=True)
     sheets_received = serializers.IntegerField(read_only=True)
     total_weight_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
@@ -29,6 +29,24 @@ class HeatNumberDetailSerializer(serializers.ModelSerializer):
             'items', 'is_available', 'created_at'
         ]
         read_only_fields = fields
+    
+    def get_grm_number(self, obj):
+        """Safely get GRM number, handling missing grm_receipt relationship"""
+        try:
+            # Try to access grm_receipt if it exists
+            if hasattr(obj, 'grm_receipt') and obj.grm_receipt:
+                return obj.grm_receipt.grm_number
+            # Try to get it via the foreign key ID if available
+            if hasattr(obj, 'grm_receipt_id') and obj.grm_receipt_id:
+                from .models import GRMReceipt
+                try:
+                    grm = GRMReceipt.objects.get(id=obj.grm_receipt_id)
+                    return grm.grm_number
+                except GRMReceipt.DoesNotExist:
+                    return None
+        except Exception:
+            pass
+        return None
     
     def get_available_quantity_kg(self, obj):
         """Get remaining available quantity in KG"""
@@ -69,13 +87,30 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
     
     def get_heat_numbers(self, obj):
         """Get heat numbers with coil/sheet details for this raw material"""
-        heat_numbers = obj.heat_numbers.filter(is_available=True).order_by('-created_at')
-        
-        if not heat_numbers.exists():
+        try:
+            # Query HeatNumber directly using raw_material_id, excluding grm_receipt_id
+            # Use .only() to only select columns that exist, avoiding grm_receipt_id
+            heat_numbers = HeatNumber.objects.filter(
+                raw_material_id=obj.id,
+                is_available=True
+            ).only(
+                'id', 'heat_number', 'raw_material_id',
+                'coils_received', 'sheets_received', 'total_weight_kg',
+                'items', 'is_available', 'consumed_quantity_kg', 'created_at'
+            ).order_by('-created_at')
+            
+            if not heat_numbers.exists():
+                return "NIL"
+            
+            serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
+            return serializer.data
+        except Exception as e:
+            # If querying heat_numbers fails due to missing database column,
+            # return empty list or "NIL" instead of crashing
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not fetch heat_numbers for raw material {obj.id}: {str(e)}")
             return "NIL"
-        
-        serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
-        return serializer.data
 
 
 class RawMaterialCreateSerializer(serializers.ModelSerializer):

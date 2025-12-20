@@ -357,12 +357,10 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
     ordering = ['material_code']
     
     def get_queryset(self):
-        """Optimize queryset by prefetching heat numbers for list/retrieve actions"""
+        """Optimize queryset - avoid prefetching heat_numbers if grm_receipt_id column doesn't exist"""
         queryset = super().get_queryset()
-        if self.action in ['list', 'retrieve']:
-            queryset = queryset.prefetch_related(
-                'heat_numbers__grm_receipt'
-            )
+        # Don't prefetch heat_numbers to avoid database column issues
+        # The serializer will handle accessing heat_numbers individually
         return queryset
     
     def get_permissions(self):

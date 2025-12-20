@@ -1229,7 +1229,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
     def rm_store_dashboard(self, request):
-        """Get all MOs grouped by status for RM Store users"""
+        """Get all MOs grouped by status for RM Store users with pagination"""
         # Check if user is rm_store
         user_roles = request.user.user_roles.values_list('role__name', flat=True)
         if 'rm_store' not in user_roles:
@@ -1237,6 +1237,11 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 {'error': 'Only RM store users can access this dashboard'}, 
                 status=status.HTTP_403_FORBIDDEN
             )
+        
+        # Get pagination parameters from query params
+        limit = int(request.query_params.get('limit', 20))
+        offset = int(request.query_params.get('offset', 0))
+        status_filter = request.query_params.get('status', None)  # 'on_hold', 'in_progress', 'completed'
         
         # Get all MOs (no assignment filtering - all RM store users see all MOs)
         base_queryset = ManufacturingOrder.objects.select_related(
@@ -1255,22 +1260,99 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             Q(status='in_progress', rm_allocated_at__isnull=False)
         ).order_by('-created_at')
         
-        # Serialize data
-        approved_serializer = ManufacturingOrderListSerializer(approved_mos, many=True)
-        in_progress_serializer = ManufacturingOrderListSerializer(in_progress_mos, many=True)
-        completed_serializer = ManufacturingOrderListSerializer(completed_mos, many=True)
+        # Get total counts for summary (before pagination)
+        approved_count = approved_mos.count()
+        in_progress_count = in_progress_mos.count()
+        completed_count = completed_mos.count()
         
-        return Response({
-            'summary': {
-                'pending_approvals': approved_mos.count(),
-                'in_progress': in_progress_mos.count(),
-                'completed': completed_mos.count(),
-                'total': base_queryset.count()
-            },
-            'on_hold': approved_serializer.data,  # Keep key name for backward compatibility
-            'in_progress': in_progress_serializer.data,
-            'completed': completed_serializer.data
-        })
+        # Apply pagination if status filter is provided
+        if status_filter == 'on_hold':
+            paginated_mos = approved_mos[offset:offset + limit]
+            total_count = approved_count
+            serializer = ManufacturingOrderListSerializer(paginated_mos, many=True)
+            
+            return Response({
+                'summary': {
+                    'pending_approvals': approved_count,
+                    'in_progress': in_progress_count,
+                    'completed': completed_count,
+                    'total': base_queryset.count()
+                },
+                'results': serializer.data,
+                'count': total_count,
+                'next': f'?status={status_filter}&limit={limit}&offset={offset + limit}' if offset + limit < total_count else None,
+                'previous': f'?status={status_filter}&limit={limit}&offset={max(0, offset - limit)}' if offset > 0 else None
+            })
+        elif status_filter == 'in_progress':
+            paginated_mos = in_progress_mos[offset:offset + limit]
+            total_count = in_progress_count
+            serializer = ManufacturingOrderListSerializer(paginated_mos, many=True)
+            
+            return Response({
+                'summary': {
+                    'pending_approvals': approved_count,
+                    'in_progress': in_progress_count,
+                    'completed': completed_count,
+                    'total': base_queryset.count()
+                },
+                'results': serializer.data,
+                'count': total_count,
+                'next': f'?status={status_filter}&limit={limit}&offset={offset + limit}' if offset + limit < total_count else None,
+                'previous': f'?status={status_filter}&limit={limit}&offset={max(0, offset - limit)}' if offset > 0 else None
+            })
+        elif status_filter == 'completed':
+            paginated_mos = completed_mos[offset:offset + limit]
+            total_count = completed_count
+            serializer = ManufacturingOrderListSerializer(paginated_mos, many=True)
+            
+            return Response({
+                'summary': {
+                    'pending_approvals': approved_count,
+                    'in_progress': in_progress_count,
+                    'completed': completed_count,
+                    'total': base_queryset.count()
+                },
+                'results': serializer.data,
+                'count': total_count,
+                'next': f'?status={status_filter}&limit={limit}&offset={offset + limit}' if offset + limit < total_count else None,
+                'previous': f'?status={status_filter}&limit={limit}&offset={max(0, offset - limit)}' if offset > 0 else None
+            })
+        else:
+            # If no status filter, return first page of each status with pagination info
+            approved_paginated = approved_mos[:limit]
+            in_progress_paginated = in_progress_mos[:limit]
+            completed_paginated = completed_mos[:limit]
+            
+            approved_serializer = ManufacturingOrderListSerializer(approved_paginated, many=True)
+            in_progress_serializer = ManufacturingOrderListSerializer(in_progress_paginated, many=True)
+            completed_serializer = ManufacturingOrderListSerializer(completed_paginated, many=True)
+            
+            return Response({
+                'summary': {
+                    'pending_approvals': approved_count,
+                    'in_progress': in_progress_count,
+                    'completed': completed_count,
+                    'total': base_queryset.count()
+                },
+                'on_hold': {
+                    'results': approved_serializer.data,
+                    'count': approved_count,
+                    'next': f'?status=on_hold&limit={limit}&offset={limit}' if limit < approved_count else None,
+                    'previous': None
+                },
+                'in_progress': {
+                    'results': in_progress_serializer.data,
+                    'count': in_progress_count,
+                    'next': f'?status=in_progress&limit={limit}&offset={limit}' if limit < in_progress_count else None,
+                    'previous': None
+                },
+                'completed': {
+                    'results': completed_serializer.data,
+                    'count': completed_count,
+                    'next': f'?status=completed&limit={limit}&offset={limit}' if limit < completed_count else None,
+                    'previous': None
+                }
+            })
 
     @action(detail=False, methods=['get'])
     def supervisor_dashboard(self, request):
@@ -3078,7 +3160,34 @@ class BatchViewSet(viewsets.ModelViewSet):
                 )
         
         # Get available RM for batch creation (considering PO pending status)
-        available_rm_for_batch = float(mo.available_rm_for_batch_kg) if rm_unit == 'kg' else remaining_rm
+        # Use model property if present; otherwise compute defensively to avoid AttributeError
+        available_rm_for_batch = None
+        if rm_unit == 'kg':
+            # Prefer model property if available
+            available_attr = getattr(mo, 'available_rm_for_batch_kg', None)
+            if available_attr is not None:
+                try:
+                    available_rm_for_batch = float(available_attr)
+                except Exception:
+                    available_rm_for_batch = None
+
+            if available_rm_for_batch is None:
+                # Fallback: compute similarly to `ManufacturingOrder.available_rm_for_batch_kg`
+                try:
+                    if mo.rm_pending_from_po:
+                        related_pos = mo.related_purchase_orders.filter(status='rm_completed')
+                        if not related_pos.exists():
+                            allocated_rm_kg = (mo.rm_required_kg or Decimal('0')) - (mo.pending_po_quantity_kg or Decimal('0'))
+                            available = allocated_rm_kg - (mo.total_rm_released_kg if hasattr(mo, 'total_rm_released_kg') else Decimal('0'))
+                            available_rm_for_batch = float(max(Decimal('0'), available))
+                    if available_rm_for_batch is None:
+                        available = (mo.total_rm_limit_kg if hasattr(mo, 'total_rm_limit_kg') else (mo.rm_required_kg or Decimal('0'))) - (mo.total_rm_released_kg if hasattr(mo, 'total_rm_released_kg') else Decimal('0'))
+                        available_rm_for_batch = float(max(Decimal('0'), available))
+                except Exception:
+                    # As a last resort, fall back to remaining_rm
+                    available_rm_for_batch = remaining_rm
+        else:
+            available_rm_for_batch = remaining_rm
         
         # Get PO pending information
         related_pos_info = []

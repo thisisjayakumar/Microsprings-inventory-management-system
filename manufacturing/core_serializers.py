@@ -182,13 +182,30 @@ class BatchMinimalSerializer(serializers.ModelSerializer):
         ]
 
 
+class ProductMinimalSerializer(serializers.ModelSerializer):
+    """Minimal product serializer for MO list - only essential fields for frontend display"""
+    customer_name = serializers.CharField(source='customer_c_id.name', read_only=True)
+    
+    class Meta:
+        model = Product
+        fields = ['id', 'product_code', 'customer_name', 'material_type']
+        read_only_fields = fields
+
+
 class ManufacturingOrderListSerializer(serializers.ModelSerializer):
     """Optimized serializer for MO list view - returns only fields shown in frontend"""
     product_code_display = serializers.SerializerMethodField()
     product_code_code = serializers.SerializerMethodField()
+    product_code = ProductMinimalSerializer(read_only=True)  # Minimal product info with customer
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     rm_required_kg = serializers.SerializerMethodField()
+    remaining_rm = serializers.SerializerMethodField()
+    material_type = serializers.SerializerMethodField()
+    rm_unit = serializers.SerializerMethodField()
+    can_create_batch = serializers.ReadOnlyField()
+    batches = BatchMinimalSerializer(many=True, read_only=True)
+    strips_required = serializers.IntegerField(read_only=True)
     
     def get_product_code_display(self, obj):
         """Get product display name"""
@@ -215,11 +232,33 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
         except Exception:
             return None
     
+    def get_remaining_rm(self, obj):
+        """Get remaining RM capacity"""
+        try:
+            return float(obj.remaining_rm_capacity_kg)
+        except Exception:
+            return None
+    
+    def get_material_type(self, obj):
+        """Get material type from product_code"""
+        if obj.product_code:
+            return getattr(obj.product_code, 'material_type', None)
+        return None
+    
+    def get_rm_unit(self, obj):
+        """Get RM unit based on material type"""
+        material_type = self.get_material_type(obj)
+        if material_type == 'sheet':
+            return 'sheets'
+        return 'kg'
+    
     class Meta:
         model = ManufacturingOrder
         fields = [
             'id', 'mo_id', 'status', 'status_display', 'priority', 'priority_display',
-            'product_code_display', 'product_code_code', 'quantity', 'rm_required_kg',
+            'product_code_display', 'product_code_code', 'product_code', 'quantity', 
+            'rm_required_kg', 'remaining_rm', 'material_type', 'rm_unit', 
+            'can_create_batch', 'batches', 'strips_required', 'planned_start_date',
             'created_at', 'delivery_date'
         ]
         read_only_fields = ['mo_id']
