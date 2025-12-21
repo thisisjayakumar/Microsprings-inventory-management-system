@@ -62,7 +62,7 @@ class PurchaseOrder(models.Model):
     )
     quantity_received = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True,
-        help_text="Actual quantity received (set when GRM is created)"
+        help_text="Actual quantity received (set when GRN is created)"
     )
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)

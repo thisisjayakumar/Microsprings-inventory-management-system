@@ -517,18 +517,31 @@ class ManufacturingOrder(models.Model):
         - If RM is pending from PO and PO is not completed, return allocated RM (excluding pending PO quantity)
         - Otherwise, return total limit minus released RM
         """
-        if self.rm_pending_from_po:
-            # Check if related PO is completed
-            related_pos = self.related_purchase_orders.filter(status='rm_completed')
-            if not related_pos.exists():
-                # PO not completed - only available RM is allocated RM (excluding pending PO quantity)
-                allocated_rm_kg = self.rm_required_kg - (self.pending_po_quantity_kg or Decimal('0'))
-                available = allocated_rm_kg - self.total_rm_released_kg
-                return max(Decimal('0'), available)
-        
-        # PO completed or no pending PO - return total limit minus released RM
-        available = self.total_rm_limit_kg - self.total_rm_released_kg
-        return max(Decimal('0'), available)
+        try:
+            if hasattr(self, 'rm_pending_from_po') and self.rm_pending_from_po:
+                # Check if related PO is completed
+                if hasattr(self, 'related_purchase_orders'):
+                    related_pos = self.related_purchase_orders.filter(status='rm_completed')
+                    if not related_pos.exists():
+                        # PO not completed - only available RM is allocated RM (excluding pending PO quantity)
+                        rm_required = getattr(self, 'rm_required_kg', Decimal('0')) or Decimal('0')
+                        pending_po_qty = getattr(self, 'pending_po_quantity_kg', None) or Decimal('0')
+                        allocated_rm_kg = rm_required - pending_po_qty
+                        total_released = getattr(self, 'total_rm_released_kg', Decimal('0')) or Decimal('0')
+                        available = allocated_rm_kg - total_released
+                        return max(Decimal('0'), available)
+            
+            # PO completed or no pending PO - return total limit minus released RM
+            total_limit = getattr(self, 'total_rm_limit_kg', Decimal('0')) or Decimal('0')
+            total_released = getattr(self, 'total_rm_released_kg', Decimal('0')) or Decimal('0')
+            available = total_limit - total_released
+            return max(Decimal('0'), available)
+        except (AttributeError, TypeError, ValueError) as e:
+            # If property fails, return 0 to avoid breaking the application
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error calculating available_rm_for_batch_kg for MO {getattr(self, 'mo_id', 'unknown')}: {e}")
+            return Decimal('0')
     
     @property
     def should_show_request_additional_rm(self):
@@ -573,7 +586,17 @@ class ManufacturingOrder(models.Model):
         Get comprehensive RM summary for this MO
         """
         # Calculate available RM for batch (considering PO pending status)
-        available_rm_for_batch = float(self.available_rm_for_batch_kg)
+        # Use defensive access in case property fails
+        try:
+            available_rm_for_batch = float(self.available_rm_for_batch_kg)
+        except (AttributeError, TypeError, ValueError):
+            # Fallback: calculate from remaining_rm
+            try:
+                total_rm_required = float(self.rm_required_kg) if hasattr(self, 'rm_required_kg') else 0
+                total_rm_released = float(self.total_rm_released_kg) if hasattr(self, 'total_rm_released_kg') else 0
+                available_rm_for_batch = max(0, total_rm_required - total_rm_released)
+            except (AttributeError, TypeError, ValueError):
+                available_rm_for_batch = 0.0
         
         # Get related PO information
         related_pos_info = []
@@ -668,7 +691,7 @@ class PurchaseOrder(models.Model):
     quantity_received = models.DecimalField(
         max_digits=10, decimal_places=2,
         null=True, blank=True,
-        help_text="Actual quantity received (set when GRM is created)"
+        help_text="Actual quantity received (set when GRN is created)"
     )
     unit_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)

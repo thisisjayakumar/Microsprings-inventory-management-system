@@ -36,7 +36,7 @@ from .serializers import (
     RMAllocationSwapSerializer, RMAllocationCheckSerializer
 )
 from products.models import Product
-from inventory.models import RawMaterial, RMStockBalance, GRMReceipt, HeatNumber
+from inventory.models import RawMaterial, RMStockBalance, GRNReceipt, HeatNumber
 from inventory.transaction_manager import InventoryTransactionManager
 from third_party.models import Vendor
 from processes.models import Process
@@ -2239,12 +2239,12 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         if new_status not in valid_statuses:
             return Response({'error': 'Invalid status'}, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if GRM is required for completing the PO
+        # Check if GRN is required for completing the PO
         if new_status == 'rm_completed':
-            grm_exists = GRMReceipt.objects.filter(purchase_order=po).exists()
-            if not grm_exists:
+            grn_exists = GRNReceipt.objects.filter(purchase_order=po).exists()
+            if not grn_exists:
                 return Response(
-                    {'error': 'Cannot complete PO without creating at least one GRM Receipt for RM'}, 
+                    {'error': 'Cannot complete PO without creating at least one GRN Receipt for RM'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
@@ -3155,7 +3155,7 @@ class BatchViewSet(viewsets.ModelViewSet):
         - % completion based on batches
         """
         try:
-            mo = ManufacturingOrder.objects.select_related('product_code').get(id=mo_id)
+            mo = ManufacturingOrder.objects.select_related('product_code', 'product_code__material').get(id=mo_id)
         except ManufacturingOrder.DoesNotExist:
             return Response(
                 {'error': 'Manufacturing Order not found'},
@@ -3163,6 +3163,9 @@ class BatchViewSet(viewsets.ModelViewSet):
             )
         
         product = mo.product_code
+        material_code = None
+        if product and product.material:
+            material_code = product.material.material_code
         
         # Calculate total RM required for entire MO
         total_rm_required = None
@@ -3290,6 +3293,7 @@ class BatchViewSet(viewsets.ModelViewSet):
             'mo_id': mo.mo_id,
             'mo_quantity': mo.quantity,
             'material_type': product.material_type,
+            'material_code': material_code,
             'total_rm_required': total_rm_required,
             'rm_unit': rm_unit,
             'cumulative_rm_released': float(cumulative_rm_released),
@@ -4193,10 +4197,16 @@ def get_available_heat_numbers_for_mo(request, mo_id):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Get available heat numbers for this material
+        # Avoid select_related('grn_receipt') if grn_receipt_id column doesn't exist in database
+        # Use only() to select only existing columns, similar to inventory serializers
         heat_numbers = HeatNumber.objects.filter(
             raw_material=material,
             is_available=True
-        ).select_related('grm_receipt', 'raw_material').order_by('-created_at')
+        ).select_related('raw_material').only(
+            'id', 'heat_number', 'raw_material_id',
+            'coils_received', 'sheets_received', 'total_weight_kg',
+            'items', 'is_available', 'consumed_quantity_kg', 'created_at'
+        ).order_by('-created_at')
         
         # Serialize heat number data with coil information
         heat_numbers_data = []
@@ -4212,10 +4222,19 @@ def get_available_heat_numbers_for_mo(request, mo_id):
                             'weight': float(item.get('weight', 0))
                         })
                 
+                # Try to get grn_number, but handle case where grn_receipt_id column doesn't exist
+                grn_number = None
+                try:
+                    if hasattr(heat, 'grn_receipt') and heat.grn_receipt:
+                        grn_number = heat.grn_receipt.grn_number
+                except (AttributeError, Exception):
+                    # If grn_receipt relationship doesn't exist or column is missing, set to None
+                    grn_number = None
+                
                 heat_numbers_data.append({
                     'id': heat.id,
                     'heat_number': heat.heat_number,
-                    'grm_number': heat.grm_receipt.grm_number if heat.grm_receipt else None,
+                    'grn_number': grn_number,
                     'total_weight_kg': float(heat.total_weight_kg or 0),
                     'consumed_quantity_kg': float(heat.consumed_quantity_kg),
                     'available_quantity_kg': float(available_qty),
@@ -4530,11 +4549,19 @@ class RawMaterialAllocationViewSet(viewsets.ReadOnlyModelViewSet):
                     else:
                         diagnostic_info['possible_reasons'].append('Allocation may have failed during approval. Check backend logs for [RM_RESERVATION] entries.')
         
+        # Get material_type from MO's product material or first allocation
+        material_type = None
+        if mo.product_code and mo.product_code.material:
+            material_type = mo.product_code.material.material_type
+        elif allocations.exists() and allocations.first().raw_material:
+            material_type = allocations.first().raw_material.material_type
+        
         response_data = {
             'mo_id': mo.mo_id,
             'mo_priority': mo.priority,
             'mo_status': mo.status,
             'required_rm_kg': required_kg,
+            'material_type': material_type,
             'allocations': serializer.data,
             'allocation_count': len(serializer.data),
             'allocation_statuses': allocation_statuses,

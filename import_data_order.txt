@@ -9,4 +9,4 @@ python3 manage.py import_customers_from_csv management_data/customers_with_ids.c
 
 python3 manage.py import_spring_processes management_data/spring_process.csv
 python3 manage.py import_stamp_processes management_data/stamp_process.csv
-
+python manage.py import_heat_numbers management_data/heat_numbers.csv 

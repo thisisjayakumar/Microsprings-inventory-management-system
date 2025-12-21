@@ -570,10 +570,12 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
         from inventory.serializers import RMReturnSerializer
         from inventory.models import RMReturn
         
+        # Avoid select_related('heat_number') if grn_receipt_id column doesn't exist in database
+        # heat_number will be loaded lazily when accessed, avoiding the JOIN that requires grn_receipt_id
         rm_returns = RMReturn.objects.filter(
             manufacturing_order=obj
         ).select_related(
-            'raw_material', 'heat_number', 'batch', 'returned_from_location',
+            'raw_material', 'batch', 'returned_from_location',
             'returned_by', 'disposed_by'
         ).order_by('-returned_at')
         
@@ -608,7 +610,7 @@ class PurchaseOrderStatusSerializer(serializers.ModelSerializer):
 
 
 class RawMaterialMinimalSerializer(serializers.ModelSerializer):
-    """Minimal raw material serializer for nested PO relationships - only fields needed for GRM creation"""
+    """Minimal raw material serializer for nested PO relationships - only fields needed for GRN creation"""
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     
     class Meta:
@@ -625,8 +627,8 @@ class PurchaseOrderListSerializer(serializers.ModelSerializer):
     material_code = serializers.SerializerMethodField()
     vendor_name_display = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    rm_code = RawMaterialMinimalSerializer(read_only=True)  # Include nested rm_code for GRM creation
-    vendor_name = VendorBasicSerializer(read_only=True)  # Include nested vendor_name for GRM creation
+    rm_code = RawMaterialMinimalSerializer(read_only=True)  # Include nested rm_code for GRN creation
+    vendor_name = VendorBasicSerializer(read_only=True)  # Include nested vendor_name for GRN creation
     
     def get_material_name(self, obj):
         """Get material name"""
@@ -1254,6 +1256,19 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at']
     
+    def to_representation(self, instance):
+        """Optimize response for create operations - exclude heavy nested data"""
+        data = super().to_representation(instance)
+        
+        # For create operations, exclude mo_details to reduce response size
+        # The frontend can fetch batches separately if needed
+        request = self.context.get('request')
+        if request and request.method == 'POST':
+            # Remove mo_details for create response - it's too heavy and not needed
+            data.pop('mo_details', None)
+        
+        return data
+    
     def create(self, validated_data):
         """Create batch with RM release calculation"""
         logger.info(f"Creating batch with validated_data: {validated_data}")
@@ -1275,15 +1290,24 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         
         # Check if batch can be created (includes PO pending check)
         if not mo.can_create_batch:
+            # Get available RM defensively to avoid AttributeError
+            available_rm = None
+            try:
+                available_rm = getattr(mo, 'available_rm_for_batch_kg', None)
+                if available_rm is not None:
+                    available_rm = float(available_rm)
+            except (AttributeError, TypeError, ValueError):
+                available_rm = None
+            
             if mo.rm_pending_from_po:
                 related_pos = mo.related_purchase_orders.all()
                 pending_pos = [po for po in related_pos if po.status != 'rm_completed']
                 if pending_pos:
                     po_list = ', '.join([po.po_id for po in pending_pos])
+                    available_msg = f"Available RM for batch: {available_rm:.3f} kg" if available_rm is not None else ""
                     raise serializers.ValidationError(
                         f"Cannot create batch. Raw material is pending from Purchase Order(s): {po_list}. "
-                        f"Please wait for PO completion before releasing additional batches. "
-                        f"Available RM for batch: {float(mo.available_rm_for_batch_kg):.3f} kg"
+                        f"Please wait for PO completion before releasing additional batches. {available_msg}"
                     )
             raise serializers.ValidationError(
                 f"Cannot create batch for MO {mo.mo_id}. Check RM allocation status."
@@ -1308,37 +1332,54 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         # Calculate RM to release for this batch
         # NOTE: planned_quantity now stores RM in grams (integer) directly from user input
         # User enters RM amount in kg, frontend converts to grams and sends as integer
+        # NOTE: Tolerance is applied at MO level, not per batch. Each batch releases exact amount.
         
         product = mo.product_code
         batch_quantity_grams = validated_data.get('planned_quantity')
         
         # Convert grams to kg for logging/tracking
-        rm_base_kg = Decimal(str(batch_quantity_grams / 1000))
+        rm_kg = Decimal(str(batch_quantity_grams / 1000))
         
-        # Apply tolerance to calculate final RM
-        tolerance = mo.tolerance_percentage or Decimal('2.00')
-        tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
-        rm_final_kg = rm_base_kg * tolerance_factor
+        logger.info(f"Batch RM allocation: {rm_kg}kg (exact amount, no tolerance applied per batch)")
         
-        logger.info(f"Batch RM allocation: Base={rm_base_kg}kg, Tolerance={tolerance}%, Final={rm_final_kg}kg")
+        # Get available RM defensively to avoid AttributeError
+        available_rm = None
+        try:
+            available_rm_attr = getattr(mo, 'available_rm_for_batch_kg', None)
+            if available_rm_attr is not None:
+                available_rm = float(available_rm_attr)
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.warning(f"Could not access available_rm_for_batch_kg property: {e}")
+            # Fallback: calculate from remaining_rm if property not available
+            try:
+                total_rm_required = float(mo.rm_required_kg) if hasattr(mo, 'rm_required_kg') else None
+                total_rm_released = float(mo.total_rm_released_kg) if hasattr(mo, 'total_rm_released_kg') else 0
+                if total_rm_required is not None:
+                    available_rm = max(0, total_rm_required - total_rm_released)
+            except (AttributeError, TypeError, ValueError):
+                available_rm = None
         
         # Validate that batch RM doesn't exceed available RM (considering PO pending status)
-        available_rm = mo.available_rm_for_batch_kg
-        if rm_final_kg > available_rm:
-            if mo.rm_pending_from_po:
-                related_pos = mo.related_purchase_orders.all()
-                pending_pos = [po for po in related_pos if po.status != 'rm_completed']
-                if pending_pos:
-                    po_list = ', '.join([po.po_id for po in pending_pos])
-                    raise serializers.ValidationError(
-                        f"Cannot create batch. Batch RM ({float(rm_final_kg):.3f} kg) exceeds available RM "
-                        f"({float(available_rm):.3f} kg). Raw material is pending from Purchase Order(s): {po_list}. "
-                        f"Please wait for PO completion or reduce batch quantity."
-                    )
-            raise serializers.ValidationError(
-                f"Cannot create batch. Batch RM ({float(rm_final_kg):.3f} kg) exceeds available RM "
-                f"({float(available_rm):.3f} kg)."
-            )
+        # Note: We allow exceeding if coils are selected (entire coils must be released)
+        if available_rm is not None and rm_kg > available_rm:
+            # Check if coils are selected - if so, allow exceeding (entire coils must be released)
+            selected_coils = validated_data.get('selected_coils', [])
+            if not selected_coils:
+                # No coils selected - enforce limit
+                if mo.rm_pending_from_po:
+                    related_pos = mo.related_purchase_orders.all()
+                    pending_pos = [po for po in related_pos if po.status != 'rm_completed']
+                    if pending_pos:
+                        po_list = ', '.join([po.po_id for po in pending_pos])
+                        raise serializers.ValidationError(
+                            f"Cannot create batch. Batch RM ({float(rm_kg):.3f} kg) exceeds available RM "
+                            f"({available_rm:.3f} kg). Raw material is pending from Purchase Order(s): {po_list}. "
+                            f"Please wait for PO completion or reduce batch quantity."
+                        )
+                raise serializers.ValidationError(
+                    f"Cannot create batch. Batch RM ({float(rm_kg):.3f} kg) exceeds available RM "
+                    f"({available_rm:.3f} kg)."
+                )
         
         # Don't add rm_released_kg to validated_data - Batch model doesn't have this field
         # The RM tracking is done via planned_quantity (in grams)
@@ -1685,6 +1726,7 @@ class RawMaterialAllocationMinimalSerializer(serializers.ModelSerializer):
     """Highly optimized minimal serializer for RM allocations in production-head MO detail page"""
     raw_material_name = serializers.CharField(source='raw_material.material_name', read_only=True)
     allocated_by_name = serializers.CharField(source='allocated_by.get_full_name', read_only=True)
+    material_type = serializers.CharField(source='raw_material.material_type', read_only=True)
 
     class Meta:
         model = RawMaterialAllocation
@@ -1694,7 +1736,7 @@ class RawMaterialAllocationMinimalSerializer(serializers.ModelSerializer):
         # swapped_by, swap_reason, locked_at, locked_by, locked_by_name, notes, history
         fields = [
             'raw_material_name', 'allocated_quantity_kg', 'status',
-            'allocated_at', 'allocated_by_name'
+            'allocated_at', 'allocated_by_name', 'material_type'
         ]
 
 

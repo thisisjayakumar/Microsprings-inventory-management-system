@@ -64,9 +64,9 @@ class InventoryTransactionManager:
     
     @staticmethod
     @transaction.atomic
-    def create_grm_receipt_transaction(grm_receipt, heat_numbers_data, user):
+    def create_grn_receipt_transaction(grn_receipt, heat_numbers_data, user):
         """
-        Track GRM receipt - materials received at RM Store
+        Track GRN receipt - materials received at RM Store
         Creates transaction for each heat number
         """
         transactions = []
@@ -76,11 +76,11 @@ class InventoryTransactionManager:
             heat_number = heat_data['heat_number']
             quantity_kg = heat_data['quantity_kg']
             
-            transaction_id = generate_transaction_id('GRM')
+            transaction_id = generate_transaction_id('GRN')
             
-            notes = f"GRM {grm_receipt.grm_number} - Material received from {grm_receipt.purchase_order.vendor_name.name}"
-            if grm_receipt.truck_number:
-                notes += f" (Truck: {grm_receipt.truck_number})"
+            notes = f"GRN {grn_receipt.grn_number} - Material received from {grn_receipt.purchase_order.vendor_name.name}"
+            if grn_receipt.truck_number:
+                notes += f" (Truck: {grn_receipt.truck_number})"
             
             inv_transaction = InventoryTransaction.objects.create(
                 transaction_id=transaction_id,
@@ -90,12 +90,12 @@ class InventoryTransactionManager:
                 location_from=None,  # Vendor
                 location_to=rm_store_location,
                 quantity=quantity_kg,
-                unit_cost=grm_receipt.purchase_order.unit_price,
-                total_value=Decimal(str(quantity_kg)) * grm_receipt.purchase_order.unit_price,
+                unit_cost=grn_receipt.purchase_order.unit_price,
+                total_value=Decimal(str(quantity_kg)) * grn_receipt.purchase_order.unit_price,
                 transaction_datetime=timezone.now(),
                 created_by=user,
                 reference_type='po',
-                reference_id=str(grm_receipt.purchase_order.id),
+                reference_id=str(grn_receipt.purchase_order.id),
                 notes=notes
             )
             
@@ -106,7 +106,7 @@ class InventoryTransactionManager:
                 quantity_kg=quantity_kg,
                 coils_count=heat_number.coils_received,
                 sheets_count=heat_number.sheets_received,
-                grm_number=grm_receipt.grm_number
+                grn_number=grn_receipt.grn_number
             )
             
             transactions.append(inv_transaction)
@@ -115,13 +115,13 @@ class InventoryTransactionManager:
     
     @staticmethod
     @transaction.atomic
-    def create_grm_completion_transaction(grm_receipt, user):
+    def create_grn_completion_transaction(grn_receipt, user):
         """
-        Track GRM completion - materials added to stock
+        Track GRN completion - materials added to stock
         """
         rm_store_location = InventoryTransactionManager.get_or_create_location('rm_store')
         
-        for heat_number in grm_receipt.heat_numbers.all():
+        for heat_number in grn_receipt.heat_numbers.all():
             # Update stock balance
             stock_balance, created = RMStockBalance.objects.get_or_create(
                 raw_material=heat_number.raw_material,
@@ -216,7 +216,7 @@ class InventoryTransactionManager:
                 quantity_kg=rm_quantity_kg,
                 coils_count=1,  # Adjust based on actual consumption
                 sheets_count=0,
-                grm_number=heat_number.grm_receipt.grm_number
+                grn_number=heat_number.grn_receipt.grn_number
             )
         
         return inv_transaction

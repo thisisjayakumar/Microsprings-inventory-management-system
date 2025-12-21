@@ -613,6 +613,7 @@ class RMAllocationService:
             alloc_data = {
                 'id': allocation.id,
                 'raw_material': allocation.raw_material.material_code,
+                'material_type': allocation.raw_material.material_type if allocation.raw_material else None,
                 'quantity_kg': float(allocation.allocated_quantity_kg),
                 'status': allocation.status,
                 'can_be_swapped': allocation.can_be_swapped,
