@@ -76,6 +76,19 @@ class Batch(models.Model):
     # Additional tracking
     notes = models.TextField(blank=True, help_text="Any special notes or instructions for this batch")
     
+    # RM Release Tracking
+    released_coils = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of coils released for this batch with heat numbers and weights"
+    )
+    rm_returned_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        default=0,
+        help_text="Total RM returned from this batch (in kg)"
+    )
+    
     # MO Stop/Release control
     can_release = models.BooleanField(
         default=True,
@@ -122,4 +135,17 @@ class Batch(models.Model):
         if self.planned_quantity and self.planned_quantity > 0 and self.actual_quantity_completed is not None:
             return (self.actual_quantity_completed / self.planned_quantity) * 100
         return 0
+    
+    @property
+    def rm_released_kg(self):
+        """Calculate total RM released for this batch in kg"""
+        # planned_quantity is stored in grams, convert to kg
+        return self.planned_quantity / 1000 if self.planned_quantity else 0
+    
+    @property
+    def rm_used_kg(self):
+        """Calculate actual RM used (Released - Returned)"""
+        released = self.rm_released_kg
+        returned = float(self.rm_returned_kg) if self.rm_returned_kg else 0
+        return released - returned
 

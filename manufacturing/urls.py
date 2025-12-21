@@ -31,6 +31,7 @@ from .views.supervisor_config_views import (
     SupervisorChangeLogViewSet,
     SupervisorReportViewSet
 )
+from .views.rm_return_views import RMReturnViewSet
 
 # Create router and register viewsets
 router = DefaultRouter()
@@ -44,6 +45,7 @@ router.register(r'batch-process-executions', BatchProcessExecutionViewSet, basen
 router.register(r'outsourcing', OutsourcingRequestViewSet, basename='outsourcingrequest')
 router.register(r'rm-allocations', RawMaterialAllocationViewSet, basename='rmallocation')
 router.register(r'additional-rm-requests', AdditionalRMRequestViewSet, basename='additionalrmrequest')
+router.register(r'rm-returns', RMReturnViewSet, basename='rmreturn')
 
 # Supervisor Process Management ViewSets
 router.register(r'process-stops', ProcessStopViewSet, basename='process-stop')

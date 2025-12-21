@@ -3076,18 +3076,15 @@ class BatchViewSet(viewsets.ModelViewSet):
         batch = serializer.save()
         
         # Calculate RM quantity for the batch
+        # NOTE: Tolerance is applied at MO level, not per batch. Each batch releases exact amount.
         product = batch.mo.product_code
         rm_quantity_kg = 0
         
         if product.material_type == 'coil' and product.grams_per_product:
             # batch.planned_quantity is in grams
             batch_quantity_grams = batch.planned_quantity
-            batch_rm_base_kg = Decimal(str(batch_quantity_grams / 1000))
-            
-            # Apply tolerance
-            tolerance = batch.mo.tolerance_percentage or Decimal('2.00')
-            tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
-            rm_quantity_kg = float(batch_rm_base_kg * tolerance_factor)
+            # Use exact amount without tolerance - tolerance is only applied at MO level
+            rm_quantity_kg = float(Decimal(str(batch_quantity_grams / 1000)))
         
         # Create inventory transaction for RM allocation
         try:

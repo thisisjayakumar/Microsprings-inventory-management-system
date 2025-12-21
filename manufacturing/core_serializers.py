@@ -1241,6 +1241,18 @@ class BatchDetailSerializer(serializers.ModelSerializer):
     mo_id = serializers.IntegerField(write_only=True)
     assigned_operator_id = serializers.IntegerField(write_only=True, required=False)
     assigned_supervisor_id = serializers.IntegerField(write_only=True, required=False)
+    selected_coils = serializers.ListField(
+        child=serializers.DictField(),
+        write_only=True,
+        required=False,
+        help_text="List of selected coils with heat_number, coil_number, and weight"
+    )
+    
+    # Read fields for coil tracking
+    released_coils = serializers.JSONField(read_only=True)
+    rm_returned_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
+    rm_released_kg = serializers.ReadOnlyField()
+    rm_used_kg = serializers.ReadOnlyField()
     
     class Meta:
         model = Batch
@@ -1252,9 +1264,10 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             'progress_percentage', 'current_process_step', 'assigned_operator',
             'assigned_operator_id', 'assigned_supervisor', 'assigned_supervisor_id',
             'total_processing_time_minutes', 'notes', 'completion_percentage',
-            'is_overdue', 'remaining_quantity', 'created_by', 'created_at', 'updated_at'
+            'is_overdue', 'remaining_quantity', 'created_by', 'created_at', 'updated_at',
+            'selected_coils', 'released_coils', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
         ]
-        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at']
+        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'rm_returned_kg']
     
     def to_representation(self, instance):
         """Optimize response for create operations - exclude heavy nested data"""
@@ -1384,6 +1397,9 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         # Don't add rm_released_kg to validated_data - Batch model doesn't have this field
         # The RM tracking is done via planned_quantity (in grams)
         
+        # Extract selected_coils from validated_data before creating batch
+        selected_coils = validated_data.pop('selected_coils', [])
+        
         # Create the batch
         batch = Batch.objects.create(
             mo=mo,
@@ -1391,8 +1407,51 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             assigned_operator=operator,
             assigned_supervisor=supervisor,
             created_by=self.context['request'].user,
+            released_coils=selected_coils,  # Store coil information
             **validated_data
         )
+        
+        # Check if RM exceeds allocation and send notification to PH
+        if available_rm is not None and rm_kg > available_rm:
+            try:
+                from notifications.models import WorkflowNotification
+                from django.contrib.auth import get_user_model
+                
+                User = get_user_model()
+                
+                # Get all Production Heads
+                ph_users = User.objects.filter(
+                    user_roles__role__name='production_head',
+                    user_roles__is_active=True,
+                    is_active=True
+                ).distinct()
+                
+                excess_kg = float(rm_kg - available_rm)
+                
+                # Create notification for each PH
+                for ph_user in ph_users:
+                    WorkflowNotification.objects.create(
+                        notification_type='rm_excess_released',
+                        title=f'RM Excess Released: {mo.mo_id}',
+                        message=(
+                            f'RM Store has released {float(rm_kg):.3f} kg for batch {batch.batch_id}, '
+                            f'which exceeds the allocated RM by {excess_kg:.3f} kg. '
+                            f'Available RM was {available_rm:.3f} kg. '
+                            f'Entire coil(s) were released as partial coil release is not allowed.'
+                        ),
+                        recipient=ph_user,
+                        related_mo=mo,
+                        related_batch=batch,
+                        priority='medium',
+                        action_required=False,
+                        created_by=self.context['request'].user
+                    )
+                
+                logger.info(f"Sent RM excess notification to {ph_users.count()} Production Head(s) for batch {batch.batch_id}")
+                
+            except Exception as e:
+                logger.error(f"Error sending RM excess notification: {e}", exc_info=True)
+                # Don't fail batch creation if notification fails
         
         # Update MO status to in_progress if this is the first batch
         if mo.batches.count() == 1:  # This is the first batch

@@ -503,6 +503,24 @@ def logout_user(request):
         logout_reason = request.data.get('logout_reason')  # 'break' or 'end_of_day'
         break_type_id = request.data.get('break_type_id')  # Required if logout_reason is 'break'
         
+        # Check if user has supervisor role
+        is_supervisor = request.user.user_roles.filter(
+            role__name='supervisor', 
+            is_active=True
+        ).exists()
+        
+        # For non-supervisor users, default to 'end_of_day' if not provided
+        # For supervisors, logout_reason is required
+        if not logout_reason:
+            if is_supervisor:
+                return Response(
+                    {'error': 'logout_reason is required for supervisors. Must be "break" or "end_of_day"'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            else:
+                # Default to 'end_of_day' for non-supervisor users
+                logout_reason = 'end_of_day'
+        
         # Validate logout reason
         if logout_reason not in ['break', 'end_of_day']:
             return Response(
@@ -525,12 +543,6 @@ def logout_user(request):
                     {'error': f'Break type with id {break_type_id} not found or inactive'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
-        
-        # Check if user has supervisor role
-        is_supervisor = request.user.user_roles.filter(
-            role__name='supervisor', 
-            is_active=True
-        ).exists()
         
         reassignment_summary = []
         

@@ -470,6 +470,28 @@ class ManufacturingOrder(models.Model):
         return Decimal(str(total / 1000)) if total else Decimal('0')
     
     @property
+    def total_rm_returned_kg(self):
+        """
+        Calculate total RM returned from all batches
+        """
+        from django.db.models import Sum
+        total = self.batches.aggregate(
+            total=Sum('rm_returned_kg')
+        )['total'] or Decimal('0')
+        
+        return Decimal(str(total))
+    
+    @property
+    def total_rm_used_kg(self):
+        """
+        Calculate actual RM used (Released - Returned)
+        Used RM = Total Released - Total Returned
+        """
+        released = self.total_rm_released_kg
+        returned = self.total_rm_returned_kg
+        return released - returned
+    
+    @property
     def remaining_rm_capacity_kg(self):
         """
         Calculate remaining RM capacity before hitting the limit

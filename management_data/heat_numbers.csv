@@ -1,9 +1,16 @@
-Material code,Qty,Heat No.1,Coil No.1,Wt,Coil No.2,Wt,Heat No.2,Coil No.1,Wt,Coil No.2,Wt
-Coil-ST Spring Steel-DH-1.80mm,587,H_32594,C_352,150,C_305,120,H_22158,C_757,100,C_757,217
-Coil-SS Stainless Steel-304-Bright-0.50mm,418,H_64157,C_998,205,,,H_93905,C_689,213,,
-Coil-ST Spring Steel-DH-1.40mm,605,H_33740,C_188,300,C_555,150,H_23918,C_684,155,,
-Coil-ST Spring Steel-DH-0.30mm,592,H_32326,C_895,190,,,H_12724,C_682,200,C_178,202
-Coil-ST Spring Steel-DH-0.40mm,219,H_52288,C_729,100,C_291,119,,,,,
-Coil-ST Spring Steel-DH-0.45mm,203,H_71258,C_176,50,C_993,60,H_78834,C_148,40,C_999,53
-Coil-ST Spring Steel-DH-2.80mm,194,H_36574,C_863,90,,,H_54011,C_820,104,,
-Coil-ST Spring Steel-DH-4.00mm,127,H_34834,C_308,40,,,H_81003,C_571,30,C_495,57
+Material code,Qty,Heat Numbers,GRN No.,Coil No.1,Wt,Coil No.2,Wt
+Coil-ST Spring Steel-DH-1.80mm,270,H_14091,G_648760,C_127,150,C_834,120
+Coil-ST Spring Steel-DH-1.80mm,317,H_80085,G_648760,C_706,100,C_945,217
+Coil-SS Stainless Steel-304-Bright-0.50mm,205,H_41974,G_482518,C_942,205,,
+Coil-SS Stainless Steel-304-Bright-0.50mm,213,H_16906,G_482518,C_759,213,,
+Coil-ST Spring Steel-DH-1.40mm,450,H_14170,G_924380,C_908,300,C_691,150
+Coil-ST Spring Steel-DH-1.40mm,155,H_26103,G_115753,C_390,155,,
+Coil-ST Spring Steel-DH-0.30mm,190,H_78530,G_265603,C_338,190,,
+Coil-ST Spring Steel-DH-0.30mm,402,H_29309,G_265603,C_819,200,C_134,202
+Coil-ST Spring Steel-DH-0.40mm,219,H_31806,G_265603,C_954,100,C_975,119
+Coil-ST Spring Steel-DH-0.45mm,110,H_3494,G_265603,C_414,50,C_638,60
+Coil-ST Spring Steel-DH-0.45mm,93,H_9240,G_265603,C_273,40,C_139,53
+Coil-ST Spring Steel-DH-2.80mm,90,H_21637,G_242333,C_139,90,,
+Coil-ST Spring Steel-DH-2.80mm,104,H_80120,G_835256,C_925,104,,
+Coil-ST Spring Steel-DH-4.00mm,40,H_86878,G_561562,C_489,40,,
+Coil-ST Spring Steel-DH-4.00mm,87,H_97651,G_561562,C_954,30,C_834,57
