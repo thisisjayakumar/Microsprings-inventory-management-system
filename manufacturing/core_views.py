@@ -3173,8 +3173,10 @@ class BatchViewSet(viewsets.ModelViewSet):
             total_grams = mo.quantity * product.grams_per_product
             base_rm_kg = Decimal(str(total_grams / 1000))
             
-            # Use base RM without tolerance
-            total_rm_required = float(base_rm_kg)
+            tolerance = mo.tolerance_percentage or Decimal('2.00')
+            tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
+            total_rm_required = float(base_rm_kg * tolerance_factor)
+            
             rm_unit = 'kg'
             
         elif product.material_type == 'sheet' and product.pcs_per_strip:
@@ -3185,6 +3187,12 @@ class BatchViewSet(viewsets.ModelViewSet):
         
         # Get all batches for this MO
         batches = Batch.objects.filter(mo=mo).exclude(status='cancelled')
+        
+        # DEBUG: Log batch query for MO batch summary
+        logger.info(f"[DEBUG] MO Batch Summary - MO ID: {mo_id}, MO Identifier: {mo.mo_id}, Batches found: {batches.count()}")
+        for b in batches:
+            if b.mo.id != mo.id:
+                logger.error(f"[CRITICAL] Batch {b.batch_id} belongs to WRONG MO! Expected: {mo.mo_id} (ID: {mo.id}), Found: {b.mo.mo_id} (ID: {b.mo.id})")
         
         # Calculate cumulative RM released and scrapped
         cumulative_rm_released = Decimal('0')
@@ -3354,7 +3362,24 @@ class BatchViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # DEBUG: Log the MO ID being queried
+        try:
+            mo = ManufacturingOrder.objects.get(id=mo_id)
+            logger.info(f"[DEBUG] Batches by_mo API - Querying MO ID: {mo_id}, MO Identifier: {mo.mo_id}")
+        except ManufacturingOrder.DoesNotExist:
+            logger.error(f"[DEBUG] Batches by_mo API - MO not found for ID: {mo_id}")
+            return Response(
+                {'error': 'Manufacturing Order not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
         batches = self.get_queryset().filter(mo_id=mo_id)
+        
+        # DEBUG: Log batch details
+        logger.info(f"[DEBUG] Batches by_mo API - MO {mo.mo_id} - Total batches found: {batches.count()}")
+        for batch in batches:
+            logger.info(f"[DEBUG]   - Batch ID: {batch.batch_id}, Status: {batch.status}, Planned Qty: {batch.planned_quantity}, Created: {batch.created_at}, MO: {batch.mo.mo_id}")
+        
         # Use minimal serializer for production-head MO detail page to reduce payload
         from .serializers import BatchMinimalSerializer
         serializer = BatchMinimalSerializer(batches, many=True)
@@ -4474,10 +4499,14 @@ class RawMaterialAllocationViewSet(viewsets.ReadOnlyModelViewSet):
         from .serializers import RawMaterialAllocationMinimalSerializer
         serializer = RawMaterialAllocationMinimalSerializer(allocations, many=True)
         
-        # DEBUG: Log allocation details
-        logger.info(f"[DEBUG] by_mo API - MO {mo.mo_id} - Total allocations: {allocations.count()}")
+        # DEBUG: Log allocation details with verification
+        logger.info(f"[DEBUG] RM Allocation by_mo API - Querying MO ID: {mo_id}, MO Identifier: {mo.mo_id}")
+        logger.info(f"[DEBUG] RM Allocation by_mo API - MO {mo.mo_id} - Total allocations: {allocations.count()}")
         for alloc in allocations:
-            logger.info(f"[DEBUG]   - Allocation ID: {alloc.id}, Status: {alloc.status}, Qty: {alloc.allocated_quantity_kg}kg, Material: {alloc.raw_material.material_code}")
+            # Verify the allocation actually belongs to this MO
+            if alloc.mo.id != mo.id:
+                logger.error(f"[CRITICAL] Allocation ID {alloc.id} belongs to WRONG MO! Expected: {mo.mo_id} (ID: {mo.id}), Found: {alloc.mo.mo_id} (ID: {alloc.mo.id})")
+            logger.info(f"[DEBUG]   - Allocation ID: {alloc.id}, MO: {alloc.mo.mo_id}, Status: {alloc.status}, Qty: {alloc.allocated_quantity_kg}kg, Material: {alloc.raw_material.material_code}, Created: {alloc.created_at}")
         
         # Get allocation summary
         from manufacturing.services.rm_allocation import RMAllocationService

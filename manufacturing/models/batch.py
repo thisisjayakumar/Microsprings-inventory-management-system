@@ -82,6 +82,11 @@ class Batch(models.Model):
         blank=True,
         help_text="List of coils released for this batch with heat numbers and weights"
     )
+    released_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when batch was released (RM allocated)"
+    )
     rm_returned_kg = models.DecimalField(
         max_digits=10,
         decimal_places=3,

@@ -19,7 +19,7 @@ class RMReturn(models.Model):
     Track RM returns from batches with different return reasons
     """
     # Auto-generated identifier
-    return_id = models.CharField(max_length=30, unique=True, editable=False)
+    return_id = models.CharField(max_length=60, unique=True, editable=False)
     
     # Relationships
     batch = models.ForeignKey(

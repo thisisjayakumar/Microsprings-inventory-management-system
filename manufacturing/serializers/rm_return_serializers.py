@@ -2,6 +2,7 @@
 RM Return Serializers
 """
 from rest_framework import serializers
+from django.utils import timezone
 from manufacturing.models.rm_return import RMReturn, RMReturnReasonChoices
 from manufacturing.models.batch import Batch
 from inventory.models import HeatNumber
@@ -70,7 +71,12 @@ class RMReturnCreateSerializer(serializers.Serializer):
         return_reason = data.get('return_reason')
         
         try:
-            batch = Batch.objects.get(id=batch_id)
+            # Fetch batch with related MO, product_code, and material to avoid additional queries
+            batch = Batch.objects.select_related(
+                'mo',
+                'mo__product_code',
+                'mo__product_code__material'
+            ).get(id=batch_id)
             
             # Validate that the coil was actually released in this batch
             released_coils = batch.released_coils or []
@@ -118,7 +124,7 @@ class RMReturnCreateSerializer(serializers.Serializer):
     def create(self, validated_data):
         """Create RM return and update stock accordingly"""
         from django.db import transaction
-        from inventory.models import HeatNumber, InventoryTransaction
+        from inventory.models import HeatNumber
         from notifications.models import WorkflowNotification
         from django.contrib.auth import get_user_model
         
@@ -148,25 +154,21 @@ class RMReturnCreateSerializer(serializers.Serializer):
             if return_reason == 'quality_defect':
                 # Quality Defect: Remove entire heat number from stock
                 try:
+                    # Get material_code from MO -> product_code -> material
+                    material_code = mo.product_code.material.material_code if mo.product_code and mo.product_code.material else None
+                    if not material_code:
+                        raise serializers.ValidationError("Cannot determine material code from Manufacturing Order")
+                    
                     heat_obj = HeatNumber.objects.get(
                         heat_number=heat_number,
-                        raw_material__material_code=mo.material_code
+                        raw_material__material_code=material_code
                     )
                     
                     # Mark heat number as unavailable (quarantined)
                     heat_obj.is_available = False
                     heat_obj.save(update_fields=['is_available'])
                     
-                    # Create inventory transaction for audit
-                    InventoryTransaction.objects.create(
-                        raw_material=heat_obj.raw_material,
-                        transaction_type='quality_defect',
-                        quantity_kg=heat_obj.total_weight_kg,
-                        notes=f"Quality defect - Heat {heat_number} quarantined. Batch: {batch.batch_id}",
-                        performed_by=self.context['request'].user
-                    )
-                    
-                    logger.info(f"Heat number {heat_number} quarantined due to quality defect")
+                    logger.info(f"Heat number {heat_number} quarantined due to quality defect. Batch: {batch.batch_id}")
                     
                 except HeatNumber.DoesNotExist:
                     logger.warning(f"Heat number {heat_number} not found for quality defect processing")
@@ -179,9 +181,14 @@ class RMReturnCreateSerializer(serializers.Serializer):
             elif return_reason in ['left_over', 'wrong_rm']:
                 # Left Over / Wrong RM: Add back to stock with same heat/coil
                 try:
+                    # Get material_code from MO -> product_code -> material
+                    material_code = mo.product_code.material.material_code if mo.product_code and mo.product_code.material else None
+                    if not material_code:
+                        raise serializers.ValidationError("Cannot determine material code from Manufacturing Order")
+                    
                     heat_obj = HeatNumber.objects.get(
                         heat_number=heat_number,
-                        raw_material__material_code=mo.material_code
+                        raw_material__material_code=material_code
                     )
                     
                     # Update consumed quantity (reduce it)
@@ -191,16 +198,7 @@ class RMReturnCreateSerializer(serializers.Serializer):
                     )
                     heat_obj.save(update_fields=['consumed_quantity_kg'])
                     
-                    # Create inventory transaction
-                    InventoryTransaction.objects.create(
-                        raw_material=heat_obj.raw_material,
-                        transaction_type='return',
-                        quantity_kg=returned_kg,
-                        notes=f"RM Return - {rm_return.get_return_reason_display()}. Batch: {batch.batch_id}, Coil: {coil_number}",
-                        performed_by=self.context['request'].user
-                    )
-                    
-                    logger.info(f"Returned {returned_kg}kg to heat {heat_number}, coil {coil_number}")
+                    logger.info(f"RM Return processed - {returned_kg}kg returned to heat {heat_number}, coil {coil_number}. Batch: {batch.batch_id}, Reason: {rm_return.get_return_reason_display()}")
                     
                 except HeatNumber.DoesNotExist:
                     logger.warning(f"Heat number {heat_number} not found for return processing")

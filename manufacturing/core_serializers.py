@@ -166,6 +166,9 @@ class BatchListSerializer(serializers.ModelSerializer):
 class BatchMinimalSerializer(serializers.ModelSerializer):
     """Highly optimized minimal serializer for batches in production-head MO detail page"""
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    released_coils = serializers.JSONField(read_only=True)
+    rm_returned_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
+    rm_used_kg = serializers.ReadOnlyField()
 
     class Meta:
         model = Batch
@@ -176,9 +179,12 @@ class BatchMinimalSerializer(serializers.ModelSerializer):
         # planned_start_date, planned_end_date, actual_start_date, actual_end_date,
         # is_overdue, created_at, updated_at
         # NOTE: 'notes' is included to check for batch verification status
+        # NOTE: 'released_coils' is included to show coil numbers allocated to batches
+        # NOTE: 'released_at' is included to show when batch was released (RM allocated)
         fields = [
             'id', 'batch_id', 'planned_quantity', 'actual_quantity_completed',
-            'scrap_quantity', 'status', 'status_display', 'notes'
+            'scrap_quantity', 'status', 'status_display', 'notes',
+            'released_coils', 'released_at', 'rm_returned_kg', 'rm_used_kg'
         ]
 
 
@@ -1265,9 +1271,9 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             'assigned_operator_id', 'assigned_supervisor', 'assigned_supervisor_id',
             'total_processing_time_minutes', 'notes', 'completion_percentage',
             'is_overdue', 'remaining_quantity', 'created_by', 'created_at', 'updated_at',
-            'selected_coils', 'released_coils', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
+            'selected_coils', 'released_coils', 'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
         ]
-        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'rm_returned_kg']
+        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'released_at', 'rm_returned_kg']
     
     def to_representation(self, instance):
         """Optimize response for create operations - exclude heavy nested data"""
@@ -1400,6 +1406,10 @@ class BatchDetailSerializer(serializers.ModelSerializer):
         # Extract selected_coils from validated_data before creating batch
         selected_coils = validated_data.pop('selected_coils', [])
         
+        # Set released_at timestamp when batch is created (when RM is released)
+        from django.utils import timezone
+        released_at = timezone.now()
+        
         # Create the batch
         batch = Batch.objects.create(
             mo=mo,
@@ -1408,6 +1418,7 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             assigned_supervisor=supervisor,
             created_by=self.context['request'].user,
             released_coils=selected_coils,  # Store coil information
+            released_at=released_at,  # Store release timestamp
             **validated_data
         )
         
