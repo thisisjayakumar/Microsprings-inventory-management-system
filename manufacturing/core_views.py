@@ -3173,10 +3173,8 @@ class BatchViewSet(viewsets.ModelViewSet):
             total_grams = mo.quantity * product.grams_per_product
             base_rm_kg = Decimal(str(total_grams / 1000))
             
-            # Apply tolerance
-            tolerance = mo.tolerance_percentage or Decimal('2.00')
-            tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
-            total_rm_required = float(base_rm_kg * tolerance_factor)
+            # Use base RM without tolerance
+            total_rm_required = float(base_rm_kg)
             rm_unit = 'kg'
             
         elif product.material_type == 'sheet' and product.pcs_per_strip:
@@ -3203,10 +3201,8 @@ class BatchViewSet(viewsets.ModelViewSet):
             # Convert grams to kg
             batch_rm_base_kg = Decimal(str(batch_quantity_grams / 1000))
             
-            # Apply tolerance
-            tolerance = mo.tolerance_percentage or Decimal('2.00')
-            tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
-            batch_rm = batch_rm_base_kg * tolerance_factor
+            # Use base RM without tolerance
+            batch_rm = batch_rm_base_kg
 
             cumulative_rm_released += batch_rm
             
