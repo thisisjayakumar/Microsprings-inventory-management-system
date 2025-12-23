@@ -3194,8 +3194,9 @@ class BatchViewSet(viewsets.ModelViewSet):
             if b.mo.id != mo.id:
                 logger.error(f"[CRITICAL] Batch {b.batch_id} belongs to WRONG MO! Expected: {mo.mo_id} (ID: {mo.id}), Found: {b.mo.mo_id} (ID: {b.mo.id})")
         
-        # Calculate cumulative RM released and scrapped
+        # Calculate cumulative RM released, returned, and scrapped
         cumulative_rm_released = Decimal('0')
+        cumulative_rm_returned = Decimal('0')
         cumulative_scrap_rm = Decimal('0')
         batch_details = []
         
@@ -3213,6 +3214,10 @@ class BatchViewSet(viewsets.ModelViewSet):
             batch_rm = batch_rm_base_kg
 
             cumulative_rm_released += batch_rm
+            
+            # Add returned RM (already in kg)
+            batch_returned_kg = Decimal(str(batch.rm_returned_kg)) if batch.rm_returned_kg else Decimal('0')
+            cumulative_rm_returned += batch_returned_kg
             
             # Add scrap RM (stored in grams)
             batch_scrap_kg = Decimal(str(batch.scrap_rm_weight / 1000))
@@ -3298,6 +3303,7 @@ class BatchViewSet(viewsets.ModelViewSet):
             'total_rm_required': total_rm_required,
             'rm_unit': rm_unit,
             'cumulative_rm_released': float(cumulative_rm_released),
+            'cumulative_rm_returned': float(cumulative_rm_returned),
             'cumulative_scrap_rm': float(cumulative_scrap_rm),
             'mo_scrap_rm': float(mo_scrap_kg),
             'remaining_rm': remaining_rm,

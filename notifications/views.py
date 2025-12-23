@@ -36,8 +36,7 @@ class WorkflowNotificationViewSet(viewsets.ReadOnlyModelViewSet):
         notification.read_at = timezone.now()
         notification.save()
         
-        serializer = self.get_serializer(notification)
-        return Response(serializer.data)
+        return Response({'message': 'marked as read'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def mark_action_taken(self, request, pk=None):
