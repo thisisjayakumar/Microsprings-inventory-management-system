@@ -9,10 +9,9 @@ Pillow==10.4.0
 requests==2.32.3
 
 # Database support (MySQL only)
-mysqlclient  # MySQL support
+pymysql==1.1.0  # MySQL support (pure Python, no C dependencies)
 dj-database-url==2.1.0  # Database URL parsing
 cryptography==43.0.0  # Cryptography support
-pymysql==1.1.0
 
 # Production server
 gunicorn==21.2.0

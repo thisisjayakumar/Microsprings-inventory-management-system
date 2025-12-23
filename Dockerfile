@@ -15,8 +15,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Install System Dependencies
 # ========================================
 RUN apt-get update && apt-get install -y \
-    # MySQL client libraries
-    default-libmysqlclient-dev \
     # Build tools for Python packages
     gcc \
     pkg-config \
