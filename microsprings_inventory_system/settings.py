@@ -291,17 +291,44 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.CustomUser'
 
-# Caching Configuration (for production use Redis)
+# # Caching Configuration (for production use Redis)
+# CACHES = {
+#     'default': {
+#         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+#         'LOCATION': 'unique-snowflake',
+#         'TIMEOUT': 300,  # 5 minutes default
+#         'OPTIONS': {
+#             'MAX_ENTRIES': 1000,
+#         }
+#     }
+# }
+
+# Caching Configuration - Redis for shared cache across containers
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake',
-        'TIMEOUT': 300,  # 5 minutes default
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': os.environ.get('REDIS_URL', 'redis://redis:6379/1'),
         'OPTIONS': {
-            'MAX_ENTRIES': 1000,
-        }
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'SOCKET_CONNECT_TIMEOUT': 5,
+            'SOCKET_TIMEOUT': 5,
+            'CONNECTION_POOL_KWARGS': {
+                'max_connections': 50,
+                'retry_on_timeout': True,
+            },
+            'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
+            'IGNORE_EXCEPTIONS': True,  # Fail gracefully if Redis is down
+        },
+        'TIMEOUT': 300,  # 5 minutes default
+        'KEY_PREFIX': 'msp',  # Prefix all keys with 'msp:'
     }
 }
+
+# Session storage in Redis (recommended for multi-container setup)
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+SESSION_CACHE_ALIAS = 'default'
+
+
 
 # MSP-ERP Specific Settings
 MSP_ERP_SETTINGS = {
