@@ -19,15 +19,48 @@ class RMReturnSerializer(serializers.ModelSerializer):
     return_reason_display = serializers.CharField(source='get_return_reason_display', read_only=True)
     created_by_name = serializers.CharField(source='created_by.get_full_name', read_only=True)
     
+    # Material details from MO
+    material_code = serializers.SerializerMethodField()
+    material_name = serializers.SerializerMethodField()
+    grn_number = serializers.SerializerMethodField()
+    
     class Meta:
         model = RMReturn
         fields = [
             'id', 'return_id', 'batch', 'batch_id', 'mo', 'mo_id',
             'return_reason', 'return_reason_display', 'returned_kg',
-            'heat_number', 'coil_number', 'notes', 'is_processed',
+            'heat_number', 'coil_number', 'material_code', 'material_name',
+            'grn_number', 'notes', 'is_processed',
             'processed_at', 'created_at', 'created_by', 'created_by_name'
         ]
         read_only_fields = ['return_id', 'is_processed', 'processed_at', 'created_at']
+    
+    def get_material_code(self, obj):
+        """Get material code from MO"""
+        if obj.mo and obj.mo.product_code and obj.mo.product_code.material:
+            return obj.mo.product_code.material.material_code
+        return None
+    
+    def get_material_name(self, obj):
+        """Get material name from MO"""
+        if obj.mo and obj.mo.product_code and obj.mo.product_code.material:
+            return obj.mo.product_code.material.material_name_display
+        return None
+    
+    def get_grn_number(self, obj):
+        """Get GRN number from heat number"""
+        try:
+            if obj.mo and obj.mo.product_code and obj.mo.product_code.material:
+                material_code = obj.mo.product_code.material.material_code
+                heat_obj = HeatNumber.objects.filter(
+                    heat_number=obj.heat_number,
+                    raw_material__material_code=material_code
+                ).first()
+                if heat_obj:
+                    return heat_obj.grn_number
+        except Exception:
+            pass
+        return None
 
 
 class RMReturnCreateSerializer(serializers.Serializer):

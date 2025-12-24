@@ -359,6 +359,51 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Optimize queryset - avoid prefetching heat_numbers if grn_receipt_id column doesn't exist"""
         queryset = super().get_queryset()
+        
+        # Handle stock status filtering (in_stock, out_of_stock, no_stock_record)
+        stock_status = self.request.query_params.get('stock_status', None)
+        if stock_status:
+            # Get materials with stock records from both models
+            materials_with_heat_stock = set(
+                RMStockBalanceHeat.objects.values_list('raw_material_id', flat=True)
+            )
+            materials_with_legacy_stock = set(
+                RMStockBalance.objects.values_list('raw_material_id', flat=True)
+            )
+            materials_with_any_stock_record = materials_with_heat_stock | materials_with_legacy_stock
+            
+            if stock_status == 'in_stock':
+                # Materials with stock > 0 in either model
+                materials_with_stock_heat = set(
+                    RMStockBalanceHeat.objects.filter(total_available_quantity_kg__gt=0)
+                    .values_list('raw_material_id', flat=True)
+                )
+                materials_with_stock_legacy = set(
+                    RMStockBalance.objects.filter(available_quantity__gt=0)
+                    .values_list('raw_material_id', flat=True)
+                )
+                materials_with_stock = materials_with_stock_heat | materials_with_stock_legacy
+                queryset = queryset.filter(id__in=materials_with_stock)
+                
+            elif stock_status == 'out_of_stock':
+                # Materials with stock record but quantity = 0
+                materials_with_stock_heat = set(
+                    RMStockBalanceHeat.objects.filter(total_available_quantity_kg__gt=0)
+                    .values_list('raw_material_id', flat=True)
+                )
+                materials_with_stock_legacy = set(
+                    RMStockBalance.objects.filter(available_quantity__gt=0)
+                    .values_list('raw_material_id', flat=True)
+                )
+                materials_with_stock = materials_with_stock_heat | materials_with_stock_legacy
+                # Materials with stock record but not in the "with stock" set (i.e., quantity = 0)
+                materials_out_of_stock = materials_with_any_stock_record - materials_with_stock
+                queryset = queryset.filter(id__in=materials_out_of_stock)
+                
+            elif stock_status == 'no_stock_record':
+                # Materials with no stock record in either model
+                queryset = queryset.exclude(id__in=materials_with_any_stock_record)
+        
         # Don't prefetch heat_numbers to avoid database column issues
         # The serializer will handle accessing heat_numbers individually
         return queryset
@@ -437,12 +482,51 @@ def health_check(request):
 def rm_store_dashboard_stats(request):
     """
     Get dashboard statistics for RM Store users - Raw Materials focused
+    Checks both RMStockBalanceHeat (preferred) and RMStockBalance (fallback) for accurate counts
     """
     try:
         total_raw_materials = RawMaterial.objects.count()
-        materials_with_stock = RMStockBalance.objects.filter(available_quantity__gt=0).count()
-        materials_out_of_stock = RMStockBalance.objects.filter(available_quantity=0).count()
-        materials_no_stock_record = total_raw_materials - RMStockBalance.objects.count()
+        
+        # Get all raw materials with stock records (from either model)
+        materials_with_heat_stock = set(
+            RMStockBalanceHeat.objects.values_list('raw_material_id', flat=True)
+        )
+        materials_with_legacy_stock = set(
+            RMStockBalance.objects.values_list('raw_material_id', flat=True)
+        )
+        materials_with_any_stock_record = materials_with_heat_stock | materials_with_legacy_stock
+        
+        # Count materials with stock (quantity > 0) from both models
+        materials_with_stock_heat = set(
+            RMStockBalanceHeat.objects.filter(total_available_quantity_kg__gt=0)
+            .values_list('raw_material_id', flat=True)
+        )
+        materials_with_stock_legacy = set(
+            RMStockBalance.objects.filter(available_quantity__gt=0)
+            .values_list('raw_material_id', flat=True)
+        )
+        materials_with_stock = len(materials_with_stock_heat | materials_with_stock_legacy)
+        
+        # Count materials with zero stock (quantity = 0) from both models
+        materials_out_of_stock_heat = set(
+            RMStockBalanceHeat.objects.filter(total_available_quantity_kg=0)
+            .values_list('raw_material_id', flat=True)
+        )
+        materials_out_of_stock_legacy = set(
+            RMStockBalance.objects.filter(available_quantity=0)
+            .values_list('raw_material_id', flat=True)
+        )
+        # Materials with zero stock in either model (but exclude those with stock in the other)
+        materials_out_of_stock = len(
+            (materials_out_of_stock_heat | materials_out_of_stock_legacy) - 
+            (materials_with_stock_heat | materials_with_stock_legacy)
+        )
+        
+        # Materials with no stock record at all
+        materials_no_stock_record = total_raw_materials - len(materials_with_any_stock_record)
+        
+        # Total stock records (count unique materials, not records)
+        total_stock_records = len(materials_with_any_stock_record)
         
         # Material type breakdown
         total_coils = RawMaterial.objects.filter(material_type='coil').count()
@@ -453,11 +537,12 @@ def rm_store_dashboard_stats(request):
             'materials_with_stock': materials_with_stock,
             'materials_out_of_stock': materials_out_of_stock,
             'materials_no_stock_record': materials_no_stock_record,
-            'total_stock_records': RMStockBalance.objects.count(),
+            'total_stock_records': total_stock_records,
             'total_coils': total_coils,
             'total_sheets': total_sheets
         })
     except Exception as e:
+        logger.error(f"Error in rm_store_dashboard_stats: {str(e)}", exc_info=True)
         return Response(
             {'error': 'Failed to fetch dashboard stats', 'detail': str(e)}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -512,7 +597,7 @@ class GRNReceiptViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsRMStoreUser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'quality_check_passed', 'received_by']
-    search_fields = ['grn_number', 'truck_number', 'driver_name', 'purchase_order__po_id']
+    search_fields = ['grn_number', 'truck_number', 'driver_name', 'purchase_orders__po_id']
     ordering_fields = ['receipt_date', 'created_at', 'grn_number']
     ordering = ['-receipt_date']
     
@@ -525,8 +610,11 @@ class GRNReceiptViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         return GRNReceipt.objects.select_related(
-            'purchase_order', 'purchase_order__vendor_name', 'received_by', 'quality_check_by'
-        ).prefetch_related('heat_numbers', 'heat_numbers__raw_material')
+            'received_by', 'quality_check_by'
+        ).prefetch_related(
+            'purchase_orders', 'purchase_orders__vendor_name',
+            'heat_numbers', 'heat_numbers__raw_material'
+        )
     
     @action(detail=True, methods=['post'])
     def complete_receipt(self, request, pk=None):
@@ -544,59 +632,64 @@ class GRNReceiptViewSet(viewsets.ModelViewSet):
             weight = heat_number.total_weight_kg or Decimal('0')
             total_weight_from_heat_numbers += Decimal(str(weight))
         
-        received_qty = Decimal(str(grn_receipt.purchase_order.quantity_received or 0))
+        # Calculate total received quantity from all POs in this GRN
+        total_received_qty = Decimal('0')
+        for po in grn_receipt.purchase_orders.all():
+            total_received_qty += Decimal(str(po.quantity_received or 0))
         
         # Allow 0.01 kg tolerance for rounding differences
-        difference = abs(received_qty - total_weight_from_heat_numbers)
+        difference = abs(total_received_qty - total_weight_from_heat_numbers)
         if difference > Decimal('0.01'):
             return Response({
-                'error': f'GRN total weight ({float(total_weight_from_heat_numbers):.2f} kg) does not match received quantity ({float(received_qty):.2f} kg)'
+                'error': f'GRN total weight ({float(total_weight_from_heat_numbers):.2f} kg) does not match total received quantity ({float(total_received_qty):.2f} kg)'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         grn_receipt.status = 'completed'
         grn_receipt.save()
         
-        # Update PO status to completed
-        po = grn_receipt.purchase_order
-        po.status = 'rm_completed'
-        po.save()
-        
-        # When PO is completed, update related MO to clear RM pending status
-        if po.related_mo:
-            mo = po.related_mo
-            # If RM was pending from PO, update rm_required_kg to include pending PO quantity
-            if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
-                # Update rm_required_kg to include the pending PO quantity
-                mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
-                logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
+        # Update all PO statuses to completed
+        for po in grn_receipt.purchase_orders.all():
+            po.status = 'rm_completed'
+            po.save()
             
-            mo.rm_pending_from_po = False
-            mo.pending_po_quantity_kg = None
-            mo.save()
-            
-            # Create transaction history for MO
-            try:
-                from manufacturing.core_models import MOTransactionHistory
-                from inventory.utils import generate_transaction_id
-                transaction_id = generate_transaction_id('MO_RM_PO_COMPLETED')
-                MOTransactionHistory.objects.create(
-                    mo=mo,
-                    transaction_type='rm_po_completed',
-                    transaction_id=transaction_id,
-                    description=f'RM from PO {po.po_id} is now available for MO {mo.mo_id}',
-                    details={
-                        'po_id': po.po_id,
-                        'po_quantity_received': float(po.quantity_received) if po.quantity_received else None,
-                        'mo_id': mo.mo_id,
-                    },
-                    created_by=request.user
-                )
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Failed to create MO transaction history for PO completion: {str(e)}")
+            # When PO is completed, update related MO to clear RM pending status
+            if po.related_mo:
+                mo = po.related_mo
+                # If RM was pending from PO, update rm_required_kg to include pending PO quantity
+                if mo.rm_pending_from_po and mo.pending_po_quantity_kg:
+                    # Update rm_required_kg to include the pending PO quantity
+                    mo.rm_required_kg = (mo.rm_required_kg or Decimal('0')) + mo.pending_po_quantity_kg
+                    logger.info(f"Updated MO {mo.mo_id} rm_required_kg to include pending PO quantity. New total: {mo.rm_required_kg}kg")
+                
+                mo.rm_pending_from_po = False
+                mo.pending_po_quantity_kg = None
+                mo.save()
+                
+                # Create transaction history for MO
+                try:
+                    from manufacturing.core_models import MOTransactionHistory
+                    from inventory.utils import generate_transaction_id
+                    transaction_id = generate_transaction_id('MO_RM_PO_COMPLETED')
+                    MOTransactionHistory.objects.create(
+                        mo=mo,
+                        transaction_type='rm_po_completed',
+                        transaction_id=transaction_id,
+                        description=f'RM from PO {po.po_id} is now available for MO {mo.mo_id}',
+                        details={
+                            'po_id': po.po_id,
+                            'po_quantity_received': float(po.quantity_received) if po.quantity_received else None,
+                            'mo_id': mo.mo_id,
+                        },
+                        created_by=request.user
+                    )
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Failed to create MO transaction history for PO completion: {str(e)}")
         
         # Update stock balances for all heat numbers
+        # This ensures heat numbers with coil details are added to raw material stock
+        # Each heat number is tightly bound to its heat number and coil/sheet number
         for heat_number in grn_receipt.heat_numbers.all():
             heat_number.update_stock_balance()
         
@@ -609,7 +702,80 @@ class GRNReceiptViewSet(viewsets.ModelViewSet):
             print(f"Error creating GRN completion transaction: {e}")
             # Don't fail the completion if transaction creation fails
         
+        # If PO has a related MO, automatically allocate the completed PO raw materials to that MO
+        if po.related_mo:
+            mo = po.related_mo
+            try:
+                from manufacturing.services.rm_allocation import RMAllocationService
+                
+                # Check if MO already has allocations for this raw material
+                raw_material = po.rm_code
+                existing_allocations = mo.rm_allocations.filter(
+                    raw_material=raw_material,
+                    status__in=['reserved', 'locked']
+                )
+                
+                # Calculate total already allocated
+                total_allocated = sum(
+                    alloc.allocated_quantity_kg for alloc in existing_allocations
+                )
+                
+                # Calculate required quantity (considering what's already allocated)
+                required_quantity = Decimal(str(mo.rm_required_kg)) if mo.rm_required_kg else Decimal('0')
+                remaining_to_allocate = required_quantity - total_allocated
+                
+                # Only allocate if there's remaining quantity needed
+                if remaining_to_allocate > 0:
+                    logger.info(
+                        f"Auto-allocating RM for MO {mo.mo_id} from completed PO {po.po_id}. "
+                        f"Required: {required_quantity}kg, Already allocated: {total_allocated}kg, "
+                        f"Remaining: {remaining_to_allocate}kg"
+                    )
+                    
+                    # Allocate RM to MO (this will create reserved allocations)
+                    allocation_result = RMAllocationService.allocate_rm_for_mo(mo, request.user)
+                    
+                    if allocation_result:
+                        logger.info(
+                            f"Successfully auto-allocated RM for MO {mo.mo_id} from PO {po.po_id}. "
+                            f"Created {len(allocation_result)} allocation(s)"
+                        )
+                    else:
+                        logger.warning(
+                            f"RM allocation for MO {mo.mo_id} returned empty result. "
+                            f"This may indicate insufficient stock or other allocation issues."
+                        )
+                else:
+                    logger.info(
+                        f"MO {mo.mo_id} already has sufficient RM allocated "
+                        f"({total_allocated}kg >= {required_quantity}kg). Skipping auto-allocation."
+                    )
+                    
+            except Exception as e:
+                logger.error(
+                    f"Failed to auto-allocate RM for MO {mo.mo_id} from completed PO {po.po_id}: {str(e)}",
+                    exc_info=True
+                )
+                # Don't fail the completion if allocation fails - log and continue
+                # The RM is still in stock and can be allocated manually later
+        
         serializer = self.get_serializer(grn_receipt)
+        return Response(serializer.data)
+    
+    @action(detail=False, methods=['get'])
+    def available_for_po(self, request):
+        """List GRNs that can accept new POs (all non-cancelled GRNs)"""
+        # Include all GRNs except cancelled ones - a GRN can accept new POs
+        # regardless of whether it's pending, partial, or completed
+        available_grns = GRNReceipt.objects.exclude(
+            status='cancelled'
+        ).select_related(
+            'received_by'
+        ).prefetch_related(
+            'purchase_orders', 'purchase_orders__vendor_name'
+        ).order_by('-receipt_date')
+        
+        serializer = GRNReceiptListSerializer(available_grns, many=True)
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
@@ -812,7 +978,9 @@ def pending_handover_list(request):
             handover_status='pending_handover',
             is_available=True
         ).select_related(
-            'raw_material', 'grn_receipt', 'grn_receipt__purchase_order'
+            'raw_material', 'grn_receipt'
+        ).prefetch_related(
+            'grn_receipt__purchase_orders'
         ).order_by('-created_at')
         
         serializer = HeatNumberHandoverSerializer(heat_numbers, many=True)

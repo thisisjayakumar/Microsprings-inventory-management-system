@@ -271,12 +271,11 @@ class GRNReceipt(models.Model):
     # Auto-generated GRN number
     grn_number = models.CharField(max_length=20, unique=True, editable=False)
     
-    # Related Purchase Order
-    purchase_order = models.ForeignKey(
+    # Related Purchase Orders - Multiple POs can be in one GRN
+    purchase_orders = models.ManyToManyField(
         'manufacturing.PurchaseOrder', 
-        on_delete=models.PROTECT, 
         related_name='grn_receipts',
-        help_text="Purchase Order this GRN is for"
+        help_text="Purchase Orders included in this GRN"
     )
     
     # Delivery Information
@@ -322,7 +321,10 @@ class GRNReceipt(models.Model):
         ]
     
     def __str__(self):
-        return f"GRN-{self.grn_number} - {self.purchase_order.po_id}"
+        po_ids = ', '.join([po.po_id for po in self.purchase_orders.all()[:3]])
+        if self.purchase_orders.count() > 3:
+            po_ids += f' (+{self.purchase_orders.count() - 3} more)'
+        return f"GRN-{self.grn_number} - {po_ids}"
     
     def save(self, *args, **kwargs):
         if not self.grn_number:

@@ -199,22 +199,23 @@ class HeatNumberInline(admin.TabularInline):
 @admin.register(GRNReceipt)
 class GRNReceiptAdmin(admin.ModelAdmin):
     list_display = (
-        'grn_number', 'purchase_order', 'truck_number', 'driver_name', 
+        'grn_number', 'get_purchase_orders', 'truck_number', 'driver_name', 
         'status', 'total_items_received', 'total_items_expected', 'receipt_date'
     )
     list_filter = ('status', 'receipt_date', 'quality_check_passed', 'received_by')
-    search_fields = ('grn_number', 'purchase_order__po_id', 'truck_number', 'driver_name')
+    search_fields = ('grn_number', 'purchase_orders__po_id', 'truck_number', 'driver_name')
     ordering = ('-receipt_date',)
     readonly_fields = ('grn_number', 'created_at', 'updated_at')
     date_hierarchy = 'receipt_date'
     inlines = [HeatNumberInline]
+    filter_horizontal = ('purchase_orders',)
     
     fieldsets = (
         ('GRN Information', {
-            'fields': ('grn_number', 'purchase_order', 'status')
+            'fields': ('grn_number', 'purchase_orders', 'status')
         }),
         ('Delivery Details', {
-            'fields': ('truck_number', 'driver_name', 'driver_contact', 'receipt_date', 'received_by')
+            'fields': ('truck_number', 'driver_name', 'receipt_date', 'received_by')
         }),
         ('Receipt Tracking', {
             'fields': ('total_items_received', 'total_items_expected')
@@ -224,10 +225,19 @@ class GRNReceiptAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
         ('Additional Information', {
-            'fields': ('notes', 'created_at', 'updated_at'),
+            'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
+    
+    def get_purchase_orders(self, obj):
+        """Display purchase orders in list view"""
+        pos = obj.purchase_orders.all()[:3]
+        po_ids = ', '.join([po.po_id for po in pos])
+        if obj.purchase_orders.count() > 3:
+            po_ids += f' (+{obj.purchase_orders.count() - 3} more)'
+        return po_ids or '-'
+    get_purchase_orders.short_description = 'Purchase Orders'
     
     def save_model(self, request, obj, form, change):
         if not change:  # Only set received_by for new objects
@@ -236,8 +246,8 @@ class GRNReceiptAdmin(admin.ModelAdmin):
     
     def get_queryset(self, request):
         return super().get_queryset(request).select_related(
-            'purchase_order', 'received_by', 'quality_check_by'
-        )
+            'received_by', 'quality_check_by'
+        ).prefetch_related('purchase_orders')
 
 
 @admin.register(HeatNumber)

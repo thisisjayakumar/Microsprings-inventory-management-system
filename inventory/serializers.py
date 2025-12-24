@@ -67,6 +67,9 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
     material_type_display = serializers.CharField(source='get_material_type_display', read_only=True)
     finishing_display = serializers.CharField(source='get_finishing_display', read_only=True)
     available_quantity = serializers.SerializerMethodField()
+    reserved_quantity = serializers.SerializerMethodField()
+    total_available_quantity = serializers.SerializerMethodField()
+    usable_quantity = serializers.SerializerMethodField()
     heat_numbers = serializers.SerializerMethodField()
     
     class Meta:
@@ -74,16 +77,83 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'material_code', 'material_name_display',
             'material_type_display', 'grade', 'wire_diameter_mm',
-            'finishing_display', 'available_quantity', 'heat_numbers'
+            'finishing_display', 'available_quantity', 'reserved_quantity',
+            'total_available_quantity', 'usable_quantity', 'heat_numbers'
         ]
         read_only_fields = fields
     
-    def get_available_quantity(self, obj):
-        """Get available quantity from RMStockBalance"""
+    def get_total_available_quantity(self, obj):
+        """Get total available quantity from stock (before reservations)
+        
+        Returns:
+            - float: The total available quantity (0.0 if stock record exists but quantity is 0 or None)
+            - None: If no stock record exists at all
+        """
+        # First check RMStockBalanceHeat (heat-tracked, more accurate)
+        from inventory.models import RMStockBalanceHeat
+        stock_balance_heat = RMStockBalanceHeat.objects.filter(raw_material=obj).first()
+        if stock_balance_heat:
+            # Stock record exists - return the quantity (0.0 if None or 0)
+            qty = stock_balance_heat.total_available_quantity_kg
+            return float(qty) if qty is not None else 0.0
+        
+        # Fallback to RMStockBalance (legacy)
         stock_balance = RMStockBalance.objects.filter(raw_material=obj).first()
         if stock_balance:
-            return float(stock_balance.available_quantity)
-        return 0.0
+            # Stock record exists - return the quantity (0.0 if None or 0)
+            qty = stock_balance.available_quantity
+            return float(qty) if qty is not None else 0.0
+        
+        # No stock record exists - return None
+        return None
+    
+    def get_reserved_quantity(self, obj):
+        """Get total reserved quantity by all MOs (reserved + locked allocations)
+        
+        Returns:
+            - float: Total reserved quantity in kg
+        """
+        try:
+            from manufacturing.models import RawMaterialAllocation
+            from django.db.models import Sum
+            from decimal import Decimal
+            
+            # Sum all reserved and locked allocations for this raw material
+            total_reserved = RawMaterialAllocation.objects.filter(
+                raw_material=obj,
+                status__in=['reserved', 'locked']
+            ).aggregate(
+                total=Sum('allocated_quantity_kg')
+            )['total']
+            
+            return float(total_reserved) if total_reserved is not None else 0.0
+        except Exception:
+            return 0.0
+    
+    def get_usable_quantity(self, obj):
+        """Calculate usable quantity (Total - Reserved)
+        
+        Returns:
+            - float: Usable quantity (total - reserved)
+            - None: If no stock record exists
+        """
+        total = self.get_total_available_quantity(obj)
+        reserved = self.get_reserved_quantity(obj)
+        
+        if total is None:
+            return None
+        
+        usable = total - reserved
+        return max(0.0, float(usable))  # Ensure non-negative
+    
+    def get_available_quantity(self, obj):
+        """Get available quantity (for backward compatibility - returns usable quantity)
+        
+        Returns:
+            - float: The usable quantity (total - reserved)
+            - None: If no stock record exists at all (for "No Stock Record" status)
+        """
+        return self.get_usable_quantity(obj)
     
     def get_heat_numbers(self, obj):
         """Get heat numbers with coil/sheet details for this raw material"""
@@ -476,7 +546,8 @@ class HeatNumberSerializer(serializers.ModelSerializer):
 
 class GRNReceiptSerializer(serializers.ModelSerializer):
     """Serializer for GRN Receipt model"""
-    purchase_order_details = serializers.SerializerMethodField()
+    purchase_orders_details = serializers.SerializerMethodField()
+    purchase_orders = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
     quality_check_by_name = serializers.CharField(source='quality_check_by.get_full_name', read_only=True)
     heat_numbers = HeatNumberSerializer(many=True, read_only=True)
@@ -485,7 +556,7 @@ class GRNReceiptSerializer(serializers.ModelSerializer):
     class Meta:
         model = GRNReceipt
         fields = [
-            'id', 'grn_number', 'purchase_order', 'purchase_order_details',
+            'id', 'grn_number', 'purchase_orders', 'purchase_orders_details',
             'truck_number', 'driver_name', 'receipt_date',
             'received_by', 'received_by_name', 'status', 'total_items_received',
             'total_items_expected', 'quality_check_passed',
@@ -494,17 +565,18 @@ class GRNReceiptSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'grn_number', 'created_at', 'updated_at', 'completion_percentage']
     
-    def get_purchase_order_details(self, obj):
-        """Get purchase order details"""
-        if obj.purchase_order:
-            return {
-                'po_id': obj.purchase_order.po_id,
-                'vendor_name': obj.purchase_order.vendor_name.name if obj.purchase_order.vendor_name else None,
-                'expected_date': obj.purchase_order.expected_date,
-                'quantity_ordered': obj.purchase_order.quantity_ordered,
-                'total_amount': obj.purchase_order.total_amount
+    def get_purchase_orders_details(self, obj):
+        """Get purchase orders details"""
+        return [
+            {
+                'po_id': po.po_id,
+                'vendor_name': po.vendor_name.name if po.vendor_name else None,
+                'expected_date': po.expected_date,
+                'quantity_ordered': po.quantity_ordered,
+                'total_amount': po.total_amount
             }
-        return None
+            for po in obj.purchase_orders.all()
+        ]
     
     def get_completion_percentage(self, obj):
         """Calculate completion percentage"""
@@ -515,60 +587,110 @@ class GRNReceiptSerializer(serializers.ModelSerializer):
 
 class GRNReceiptListSerializer(serializers.ModelSerializer):
     """Simplified serializer for GRN Receipt list view"""
-    po_id = serializers.CharField(source='purchase_order.po_id', read_only=True)
-    vendor_name = serializers.CharField(source='purchase_order.vendor_name.name', read_only=True)
+    purchase_orders_summary = serializers.SerializerMethodField()
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    quantity_ordered = serializers.DecimalField(
-        source='purchase_order.quantity_ordered',
-        max_digits=10,
-        decimal_places=2,
-        read_only=True
-    )
-    quantity_received = serializers.DecimalField(
-        source='purchase_order.quantity_received',
-        max_digits=10,
-        decimal_places=2,
-        read_only=True
-    )
     
     class Meta:
         model = GRNReceipt
         fields = [
-            'id', 'grn_number', 'po_id', 'vendor_name', 'truck_number',
+            'id', 'grn_number', 'purchase_orders_summary', 'truck_number',
             'driver_name', 'receipt_date', 'received_by_name', 'status',
-            'status_display', 'quantity_ordered', 'quantity_received',
-            'quality_check_passed', 'created_at'
+            'status_display', 'quality_check_passed', 'created_at'
         ]
+    
+    def get_purchase_orders_summary(self, obj):
+        """Get summary of purchase orders"""
+        pos = obj.purchase_orders.all()
+        return {
+            'count': pos.count(),
+            'po_ids': [po.po_id for po in pos],
+            'vendors': list(set([po.vendor_name.name for po in pos if po.vendor_name]))
+        }
 
 
 class GRNReceiptCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating GRN Receipt"""
-    heat_numbers_data = HeatNumberSerializer(many=True, write_only=True)
+    """Serializer for creating GRN Receipt or adding PO to existing GRN"""
+    heat_numbers_data = HeatNumberSerializer(many=True, write_only=True, required=False)
+    # Use ListField of integers to avoid circular import issues with PrimaryKeyRelatedField
+    purchase_order_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        write_only=True,
+        help_text="List of Purchase Order IDs for new GRN"
+    )
+    existing_grn_id = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="ID of existing GRN to add PO to (if adding to existing GRN)"
+    )
     
     class Meta:
         model = GRNReceipt
         fields = [
-            'purchase_order', 'truck_number', 'driver_name', 'heat_numbers_data'
+            'purchase_order_ids', 'existing_grn_id', 'truck_number', 'driver_name', 'heat_numbers_data'
         ]
     
     def validate(self, data):
         """Validate GRN receipt data"""
-        purchase_order = data.get('purchase_order')
+        purchase_order_ids = data.get('purchase_order_ids', [])
+        existing_grn_id = data.get('existing_grn_id')
         heat_numbers_data = data.get('heat_numbers_data', [])
         
-        # Check if active GRN already exists for this PO (exclude cancelled)
-        if purchase_order and GRNReceipt.objects.filter(
-            purchase_order=purchase_order
-        ).exclude(status='cancelled').exists():
+        # Fetch PurchaseOrder objects
+        from manufacturing.core_models import PurchaseOrder
+        purchase_orders = []
+        if purchase_order_ids:
+            purchase_orders = list(PurchaseOrder.objects.filter(id__in=purchase_order_ids))
+            if len(purchase_orders) != len(purchase_order_ids):
+                found_ids = {po.id for po in purchase_orders}
+                missing = [pid for pid in purchase_order_ids if pid not in found_ids]
+                raise serializers.ValidationError({
+                    'purchase_order_ids': f'Purchase orders not found: {missing}'
+                })
+        
+        # Store resolved purchase orders for use in create()
+        data['purchase_orders'] = purchase_orders
+        
+        # Must provide either purchase_orders (for new GRN) or existing_grn_id (to add to existing)
+        if not purchase_orders and not existing_grn_id:
             raise serializers.ValidationError({
-                'purchase_order': 'An active GRN receipt already exists for this Purchase Order'
+                'non_field_errors': 'Either provide purchase_orders for new GRN or existing_grn_id to add to existing GRN'
             })
         
-        # Validate heat numbers data
-        if not heat_numbers_data:
+        # Cannot provide both
+        if purchase_orders and existing_grn_id:
             raise serializers.ValidationError({
-                'heat_numbers_data': 'At least one heat number is required'
+                'non_field_errors': 'Cannot provide both purchase_orders and existing_grn_id. Choose one option.'
+            })
+        
+        # If adding to existing GRN, validate it exists and is not cancelled
+        if existing_grn_id:
+            try:
+                existing_grn = GRNReceipt.objects.get(id=existing_grn_id)
+                if existing_grn.status == 'cancelled':
+                    raise serializers.ValidationError({
+                        'existing_grn_id': 'Cannot add PO to a cancelled GRN'
+                    })
+            except GRNReceipt.DoesNotExist:
+                raise serializers.ValidationError({
+                    'existing_grn_id': 'GRN with this ID does not exist'
+                })
+        
+        # If creating new GRN, check if any PO already has an active GRN
+        if purchase_orders:
+            for po in purchase_orders:
+                if GRNReceipt.objects.filter(
+                    purchase_orders=po
+                ).exclude(status='cancelled').exists():
+                    raise serializers.ValidationError({
+                        'purchase_order_ids': f'An active GRN receipt already exists for Purchase Order {po.po_id}'
+                    })
+        
+        # Validate heat numbers data (required for new GRN, optional for adding to existing)
+        if not existing_grn_id and not heat_numbers_data:
+            raise serializers.ValidationError({
+                'heat_numbers_data': 'At least one heat number is required when creating a new GRN'
             })
         
         # Calculate total weight from heat numbers
@@ -584,23 +706,81 @@ class GRNReceiptCreateSerializer(serializers.ModelSerializer):
         return data
     
     def create(self, validated_data):
-        """Create GRN receipt with heat numbers"""
+        """Create GRN receipt with heat numbers or add PO to existing GRN"""
         from decimal import Decimal
         from inventory.models import RMStockBalance
+        from manufacturing.core_models import PurchaseOrder
         
         heat_numbers_data = validated_data.pop('heat_numbers_data', [])
         quantity_received = validated_data.pop('quantity_received', None)
+        purchase_orders = validated_data.pop('purchase_orders', [])  # Already resolved in validate()
+        validated_data.pop('purchase_order_ids', None)  # Remove the raw IDs field
+        existing_grn_id = validated_data.pop('existing_grn_id', None)
         
+        # If adding to existing GRN
+        if existing_grn_id:
+            grn_receipt = GRNReceipt.objects.get(id=existing_grn_id)
+            # Add the purchase order(s) from request data
+            request_data = self.context['request'].data
+            po_ids = request_data.get('purchase_order_ids', [])
+            if isinstance(po_ids, int):
+                po_ids = [po_ids]
+            
+            for po_id in po_ids:
+                try:
+                    po = PurchaseOrder.objects.get(id=po_id)
+                    # Check if PO is already in this GRN
+                    if not grn_receipt.purchase_orders.filter(id=po.id).exists():
+                        grn_receipt.purchase_orders.add(po)
+                except PurchaseOrder.DoesNotExist:
+                    raise serializers.ValidationError({
+                        'purchase_order_ids': f'Purchase Order {po_id} not found'
+                    })
+            
+            # Add heat numbers if provided
+            if heat_numbers_data:
+                for heat_data in heat_numbers_data:
+                    heat_number = HeatNumber.objects.create(grn_receipt=grn_receipt, **heat_data)
+                    # Update stock balances
+                    raw_material = heat_data.get('raw_material')
+                    total_weight = heat_data.get('total_weight_kg', 0)
+                    
+                    if raw_material and total_weight:
+                        stock_balance, created = RMStockBalance.objects.get_or_create(
+                            raw_material=raw_material,
+                            defaults={'available_quantity': Decimal('0')}
+                        )
+                        stock_balance.available_quantity += Decimal(str(total_weight))
+                        stock_balance.save()
+                    
+                    heat_number.update_stock_balance()
+                
+                # Update GRN totals
+                grn_receipt.total_items_received += len(heat_numbers_data)
+                if quantity_received:
+                    grn_receipt.total_items_expected += quantity_received
+                grn_receipt.save()
+            
+            return grn_receipt
+        
+        # Creating new GRN
         # Set received_by from context
         validated_data['received_by'] = self.context['request'].user
         
-        # Create GRN receipt
+        # Create GRN receipt (without purchase_orders first)
         grn_receipt = GRNReceipt.objects.create(**validated_data)
         
-        # Update PO with received quantity
-        if quantity_received and grn_receipt.purchase_order:
-            grn_receipt.purchase_order.quantity_received = quantity_received
-            grn_receipt.purchase_order.save()
+        # Add purchase orders
+        if purchase_orders:
+            grn_receipt.purchase_orders.set(purchase_orders)
+        
+        # Update PO with received quantity (for the first PO if multiple)
+        if quantity_received and purchase_orders:
+            # Update quantity_received for the first PO (or all if needed)
+            for po in purchase_orders:
+                if not po.quantity_received:
+                    po.quantity_received = quantity_received / len(purchase_orders) if len(purchase_orders) > 1 else quantity_received
+                    po.save()
         
         # Create heat numbers and update stock balances
         for i, heat_data in enumerate(heat_numbers_data):
@@ -680,26 +860,6 @@ class InventoryTransactionHeatSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id']
 
-
-class GRNReceiptListSerializer(serializers.ModelSerializer):
-    """Simplified serializer for GRN receipt list view"""
-    purchase_order_po_id = serializers.CharField(source='purchase_order.po_id', read_only=True)
-    vendor_name = serializers.CharField(source='purchase_order.vendor_name.name', read_only=True)
-    received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True)
-    heat_numbers_count = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = GRNReceipt
-        fields = [
-            'id', 'grn_number', 'purchase_order_po_id', 'vendor_name',
-            'truck_number', 'driver_name', 'status', 'total_items_received',
-            'total_items_expected', 'received_by_name', 'receipt_date',
-            'heat_numbers_count', 'quality_check_passed'
-        ]
-    
-    def get_heat_numbers_count(self, obj):
-        """Get count of heat numbers in this GRN"""
-        return obj.heat_numbers.count()
 
 
 # Handover Verification Serializers

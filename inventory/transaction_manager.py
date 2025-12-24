@@ -72,13 +72,22 @@ class InventoryTransactionManager:
         transactions = []
         rm_store_location = InventoryTransactionManager.get_or_create_location('rm_store')
         
+        # Get first PO for transaction details (or use all POs if needed)
+        first_po = grn_receipt.purchase_orders.first()
+        if not first_po:
+            raise ValueError(f"GRN {grn_receipt.grn_number} has no associated purchase orders")
+        
+        # Get vendor names (could be multiple)
+        vendor_names = [po.vendor_name.name for po in grn_receipt.purchase_orders.all() if po.vendor_name]
+        vendor_name_str = ', '.join(set(vendor_names)) if vendor_names else 'Unknown Vendor'
+        
         for heat_data in heat_numbers_data:
             heat_number = heat_data['heat_number']
             quantity_kg = heat_data['quantity_kg']
             
             transaction_id = generate_transaction_id('GRN')
             
-            notes = f"GRN {grn_receipt.grn_number} - Material received from {grn_receipt.purchase_order.vendor_name.name}"
+            notes = f"GRN {grn_receipt.grn_number} - Material received from {vendor_name_str}"
             if grn_receipt.truck_number:
                 notes += f" (Truck: {grn_receipt.truck_number})"
             
@@ -90,12 +99,12 @@ class InventoryTransactionManager:
                 location_from=None,  # Vendor
                 location_to=rm_store_location,
                 quantity=quantity_kg,
-                unit_cost=grn_receipt.purchase_order.unit_price,
-                total_value=Decimal(str(quantity_kg)) * grn_receipt.purchase_order.unit_price,
+                unit_cost=first_po.unit_price,
+                total_value=Decimal(str(quantity_kg)) * first_po.unit_price,
                 transaction_datetime=timezone.now(),
                 created_by=user,
                 reference_type='po',
-                reference_id=str(grn_receipt.purchase_order.id),
+                reference_id=str(first_po.id),  # Use first PO ID
                 notes=notes
             )
             
