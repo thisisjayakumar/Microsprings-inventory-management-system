@@ -92,6 +92,33 @@ class IsRMStoreOrProductionHead(permissions.BasePermission):
             return False
 
 
+class IsRMStoreOrProductionHeadOrManager(permissions.BasePermission):
+    """
+    Custom permission to allow RM Store users, Production Head, and Manager to access inventory transactions
+    """
+    
+    def has_permission(self, request, view):
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not request.user or not request.user.is_authenticated:
+            logger.warning(f"IsRMStoreOrProductionHeadOrManager: User not authenticated")
+            return False
+        
+        # Check if user has rm_store, production_head, or manager role
+        try:
+            user_roles = UserRole.objects.filter(
+                user=request.user, 
+                is_active=True,
+                role__name__in=['rm_store', 'production_head', 'manager']
+            ).exists()
+            
+            return user_roles
+        except Exception as e:
+            logger.error(f"IsRMStoreOrProductionHeadOrManager: Exception checking roles - {str(e)}")
+            return False
+
+
 class ProductViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Product management - accessible by RM Store users
@@ -442,9 +469,9 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
 class InventoryTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for listing inventory transactions
-    Accessible by RM Store users and Production Head
+    Accessible by RM Store users, Production Head, and Manager
     """
-    permission_classes = [IsAuthenticated, IsRMStoreOrProductionHead]
+    permission_classes = [IsAuthenticated, IsRMStoreOrProductionHeadOrManager]
     serializer_class = InventoryTransactionSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['transaction_type', 'reference_type']
@@ -918,9 +945,9 @@ class RMStockBalanceHeatViewSet(viewsets.ReadOnlyModelViewSet):
 class InventoryTransactionHeatViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for Heat-tracked inventory transactions
-    Accessible by RM Store users and Production Head
+    Accessible by RM Store users, Production Head, and Manager
     """
-    permission_classes = [IsAuthenticated, IsRMStoreOrProductionHead]
+    permission_classes = [IsAuthenticated, IsRMStoreOrProductionHeadOrManager]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['grn_number', 'heat_number__raw_material__material_type']
     search_fields = ['grn_number', 'heat_number__heat_number', 'inventory_transaction__transaction_id']
