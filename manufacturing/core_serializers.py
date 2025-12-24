@@ -1256,9 +1256,19 @@ class BatchDetailSerializer(serializers.ModelSerializer):
     
     # Read fields for coil tracking
     released_coils = serializers.JSONField(read_only=True)
+    returned_coils = serializers.SerializerMethodField()
     rm_returned_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
     rm_released_kg = serializers.ReadOnlyField()
     rm_used_kg = serializers.ReadOnlyField()
+    
+    def get_returned_coils(self, obj):
+        """Get list of returned coils with heat_number, coil_number, and return_reason"""
+        from manufacturing.models.rm_return import RMReturn
+        returns = RMReturn.objects.filter(
+            batch=obj,
+            return_reason__in=['left_over', 'wrong_rm']  # Only coils returned with these reasons are available again
+        ).values('heat_number', 'coil_number', 'returned_kg', 'return_reason')
+        return list(returns)
     
     class Meta:
         model = Batch
@@ -1271,9 +1281,9 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             'assigned_operator_id', 'assigned_supervisor', 'assigned_supervisor_id',
             'total_processing_time_minutes', 'notes', 'completion_percentage',
             'is_overdue', 'remaining_quantity', 'created_by', 'created_at', 'updated_at',
-            'selected_coils', 'released_coils', 'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
+            'selected_coils', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
         ]
-        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'released_at', 'rm_returned_kg']
+        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg']
     
     def to_representation(self, instance):
         """Optimize response for create operations - exclude heavy nested data"""

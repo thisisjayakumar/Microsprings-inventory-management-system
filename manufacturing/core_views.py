@@ -310,9 +310,10 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Calculate cumulative RM released from batches
+        # Calculate cumulative RM released and returned from batches
         batches = Batch.objects.filter(mo=mo).exclude(status='cancelled')
         cumulative_rm_released = Decimal('0')
+        cumulative_rm_returned = Decimal('0')
         
         for batch in batches:
             batch_quantity_grams = batch.planned_quantity
@@ -321,8 +322,14 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             tolerance_factor = Decimal('1') + (tolerance / Decimal('100'))
             batch_rm = batch_rm_base_kg * tolerance_factor
             cumulative_rm_released += batch_rm
+            
+            # Add returned RM (already in kg)
+            batch_returned_kg = Decimal(str(batch.rm_returned_kg)) if batch.rm_returned_kg else Decimal('0')
+            cumulative_rm_returned += batch_returned_kg
         
-        remaining_rm_kg = float(Decimal(str(total_rm_required)) - cumulative_rm_released)
+        # Calculate used RM (Released - Returned) and remaining RM
+        used_rm = cumulative_rm_released - cumulative_rm_returned
+        remaining_rm_kg = float(Decimal(str(total_rm_required)) - used_rm)
         
         if remaining_rm_kg <= 0:
             return Response(
@@ -2241,7 +2248,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         
         # Check if GRN is required for completing the PO
         if new_status == 'rm_completed':
-            grn_exists = GRNReceipt.objects.filter(purchase_order=po).exists()
+            grn_exists = GRNReceipt.objects.filter(purchase_orders=po).exists()
             if not grn_exists:
                 return Response(
                     {'error': 'Cannot complete PO without creating at least one GRN Receipt for RM'}, 
@@ -3236,13 +3243,17 @@ class BatchViewSet(viewsets.ModelViewSet):
         # Add MO-level scrap (remaining RM sent to scrap)
         mo_scrap_kg = Decimal(str(mo.scrap_rm_weight / 1000))
         
+        # Calculate used RM (Released - Returned)
+        used_rm = cumulative_rm_released - cumulative_rm_returned
+        
         # Calculate remaining and percentage
         remaining_rm = None
         completion_percentage = 0
         
         if total_rm_required is not None:
-            # Remaining = Total - Released - Already scrapped at MO level
-            remaining_rm = float(Decimal(str(total_rm_required)) - cumulative_rm_released - mo_scrap_kg)
+            # Remaining = Total - Used RM - Already scrapped at MO level
+            # Used RM = Released - Returned (accounts for returned RM)
+            remaining_rm = float(Decimal(str(total_rm_required)) - used_rm - mo_scrap_kg)
             if remaining_rm < 0:
                 remaining_rm = 0
             
