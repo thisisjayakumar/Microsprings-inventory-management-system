@@ -1264,10 +1264,11 @@ class BatchDetailSerializer(serializers.ModelSerializer):
     def get_returned_coils(self, obj):
         """Get list of returned coils with heat_number, coil_number, and return_reason"""
         from manufacturing.models.rm_return import RMReturn
+        # Include all return reasons for complete transaction history
+        # Frontend can filter based on return_reason if needed
         returns = RMReturn.objects.filter(
-            batch=obj,
-            return_reason__in=['left_over', 'wrong_rm']  # Only coils returned with these reasons are available again
-        ).values('heat_number', 'coil_number', 'returned_kg', 'return_reason')
+            batch=obj
+        ).values('heat_number', 'coil_number', 'returned_kg', 'return_reason', 'user_entered_kg', 'return_id')
         return list(returns)
     
     class Meta:
@@ -1494,6 +1495,102 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             # NOTE: Supervisor notifications now handled at process execution level
             # since supervisors are no longer assigned at MO level
             # Note: Notification system can be implemented later using Alert model
+        
+        # Process selected coils: Remove from HeatNumber items and update consumed_quantity_kg
+        if selected_coils:
+            from inventory.models import HeatNumber
+            from django.db import transaction
+            # Note: Decimal is already imported at the top of the file
+            
+            with transaction.atomic():
+                for coil_data in selected_coils:
+                    try:
+                        heat_number_str = coil_data.get('heat_number') or ''
+                        coil_number_str = coil_data.get('coil_number') or ''
+                        coil_weight = Decimal(str(coil_data.get('weight', 0)))
+                        
+                        if not heat_number_str or not coil_number_str:
+                            logger.warning(f"Invalid coil data in batch creation: {coil_data}")
+                            continue
+                        
+                        # Get material code from MO
+                        material_code = None
+                        if mo.product_code and mo.product_code.material:
+                            material_code = mo.product_code.material.material_code
+                        
+                        if not material_code:
+                            logger.warning(f"Cannot determine material code for MO {mo.mo_id}, skipping coil consumption")
+                            continue
+                        
+                        # Find the heat number
+                        heat_obj = HeatNumber.objects.filter(
+                            heat_number=heat_number_str,
+                            raw_material__material_code=material_code,
+                            is_available=True
+                        ).first()
+                        
+                        if not heat_obj:
+                            logger.warning(f"Heat number {heat_number_str} not found for material {material_code}, skipping coil consumption")
+                            continue
+                        
+                        # Update consumed_quantity_kg
+                        old_consumed = heat_obj.consumed_quantity_kg
+                        new_consumed = old_consumed + coil_weight
+                        heat_obj.consumed_quantity_kg = new_consumed
+                        
+                        # Remove coil from items array
+                        items = list(heat_obj.items) if heat_obj.items else []
+                        if not isinstance(items, list):
+                            items = []
+                        
+                        # Find and remove the coil from items by matching coil_number
+                        # Items in the array use 'coil_number' or 'number' field
+                        items = [
+                            item for item in items
+                            if str(item.get('coil_number') or item.get('number', '')).upper() != str(coil_number_str).upper()
+                        ]
+                        
+                        heat_obj.items = items
+                        heat_obj.save(update_fields=['consumed_quantity_kg', 'items'])
+                        
+                        # Update stock balance
+                        heat_obj.update_stock_balance()
+                        
+                        # Also update basic RMStockBalance
+                        from inventory.models import RMStockBalance
+                        try:
+                            stock_balance = RMStockBalance.objects.get(raw_material=heat_obj.raw_material)
+                            total_available = sum(
+                                Decimal(str(heat.get_available_quantity_kg())) 
+                                for heat in HeatNumber.objects.filter(
+                                    raw_material=heat_obj.raw_material,
+                                    is_available=True
+                                )
+                            )
+                            stock_balance.available_quantity = total_available
+                            stock_balance.save()
+                        except RMStockBalance.DoesNotExist:
+                            # Create if doesn't exist
+                            total_available = sum(
+                                Decimal(str(heat.get_available_quantity_kg())) 
+                                for heat in HeatNumber.objects.filter(
+                                    raw_material=heat_obj.raw_material,
+                                    is_available=True
+                                )
+                            )
+                            RMStockBalance.objects.create(
+                                raw_material=heat_obj.raw_material,
+                                available_quantity=total_available
+                            )
+                        
+                        logger.info(
+                            f"Consumed coil {coil_number_str} from heat {heat_number_str}: "
+                            f"{coil_weight}kg (consumed: {old_consumed} -> {new_consumed}kg)"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing coil {coil_data} during batch creation: {e}", exc_info=True)
+                        # Don't fail batch creation if coil processing fails, but log the error
         
         # Recalculate process progress for all process executions when a new batch is created
         # This ensures that if a process was marked as completed, adding a new batch will update the progress

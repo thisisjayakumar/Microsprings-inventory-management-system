@@ -149,8 +149,19 @@ class Batch(models.Model):
     
     @property
     def rm_used_kg(self):
-        """Calculate actual RM used (Released - Returned)"""
+        """Calculate actual RM used (Released - Returned)
+        Note: Quality defect returns are NOT included in returned RM calculation
+        They are quarantined and completely removed from available stock"""
         released = self.rm_released_kg
-        returned = float(self.rm_returned_kg) if self.rm_returned_kg else 0
+        # Only count non-quality_defect returns
+        # Quality defect returns are tracked separately and don't affect used RM
+        from manufacturing.models.rm_return import RMReturn
+        non_quality_returns = RMReturn.objects.filter(
+            batch=self
+        ).exclude(return_reason='quality_defect')
+        returned = sum(float(r.returned_kg) for r in non_quality_returns) if non_quality_returns.exists() else 0
+        # Fallback to batch.rm_returned_kg if no returns found (for backward compatibility)
+        if returned == 0:
+            returned = float(self.rm_returned_kg) if self.rm_returned_kg else 0
         return released - returned
 

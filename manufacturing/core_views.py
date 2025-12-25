@@ -3201,11 +3201,15 @@ class BatchViewSet(viewsets.ModelViewSet):
             if b.mo.id != mo.id:
                 logger.error(f"[CRITICAL] Batch {b.batch_id} belongs to WRONG MO! Expected: {mo.mo_id} (ID: {mo.id}), Found: {b.mo.mo_id} (ID: {b.mo.id})")
         
-        # Calculate cumulative RM released, returned, and scrapped
+        # Calculate cumulative RM released, returned, quarantined, and scrapped
         cumulative_rm_released = Decimal('0')
-        cumulative_rm_returned = Decimal('0')
+        cumulative_rm_returned = Decimal('0')  # Only non-quality_defect returns
+        cumulative_rm_quarantined = Decimal('0')  # Quality defect returns (quarantined)
         cumulative_scrap_rm = Decimal('0')
         batch_details = []
+        
+        # Import RMReturn model to check return reasons
+        from manufacturing.models.rm_return import RMReturn
         
         for batch in batches:
             batch_rm = Decimal('0')
@@ -3222,9 +3226,25 @@ class BatchViewSet(viewsets.ModelViewSet):
 
             cumulative_rm_released += batch_rm
             
-            # Add returned RM (already in kg)
-            batch_returned_kg = Decimal(str(batch.rm_returned_kg)) if batch.rm_returned_kg else Decimal('0')
+            # Separate returned RM by return reason
+            # Quality defect returns are quarantined and should NOT count toward "Returned" or "Used RM"
+            batch_returns = RMReturn.objects.filter(batch=batch)
+            batch_returned_kg = Decimal('0')  # Non-quality_defect returns
+            batch_quarantined_kg = Decimal('0')  # Quality defect returns
+            
+            for rm_return in batch_returns:
+                returned_kg = Decimal(str(rm_return.returned_kg)) if rm_return.returned_kg else Decimal('0')
+                if rm_return.return_reason == 'quality_defect':
+                    # Quality defect returns are quarantined - don't count in returned/used RM
+                    # Each return record represents a different coil, so we sum them to get total quarantined
+                    # Note: We've fixed the serializer to avoid double-counting when triggering coil is not in items
+                    batch_quarantined_kg += returned_kg
+                else:
+                    # Left over and wrong_rm returns count toward returned RM
+                    batch_returned_kg += returned_kg
+            
             cumulative_rm_returned += batch_returned_kg
+            cumulative_rm_quarantined += batch_quarantined_kg
             
             # Add scrap RM (stored in grams)
             batch_scrap_kg = Decimal(str(batch.scrap_rm_weight / 1000))
@@ -3244,6 +3264,8 @@ class BatchViewSet(viewsets.ModelViewSet):
         mo_scrap_kg = Decimal(str(mo.scrap_rm_weight / 1000))
         
         # Calculate used RM (Released - Returned)
+        # Note: Quality defect returns (quarantined) are NOT subtracted from released RM
+        # They are completely removed from available stock and don't affect used RM calculation
         used_rm = cumulative_rm_released - cumulative_rm_returned
         
         # Calculate remaining and percentage
@@ -3258,9 +3280,11 @@ class BatchViewSet(viewsets.ModelViewSet):
                 remaining_rm = 0
             
             if total_rm_required > 0:
+                # Completion percentage should be based on USED RM, not RELEASED RM
+                # Used RM = Released - Returned (this is the actual RM consumed)
                 completion_percentage = min(
                     100, 
-                    float((cumulative_rm_released / Decimal(str(total_rm_required))) * Decimal('100'))
+                    float((used_rm / Decimal(str(total_rm_required))) * Decimal('100'))
                 )
         
         # Get available RM for batch creation (considering PO pending status)
@@ -3314,7 +3338,8 @@ class BatchViewSet(viewsets.ModelViewSet):
             'total_rm_required': total_rm_required,
             'rm_unit': rm_unit,
             'cumulative_rm_released': float(cumulative_rm_released),
-            'cumulative_rm_returned': float(cumulative_rm_returned),
+            'cumulative_rm_returned': float(cumulative_rm_returned),  # Only left_over and wrong_rm
+            'cumulative_rm_quarantined': float(cumulative_rm_quarantined),  # Quality defect returns
             'cumulative_scrap_rm': float(cumulative_scrap_rm),
             'mo_scrap_rm': float(mo_scrap_kg),
             'remaining_rm': remaining_rm,

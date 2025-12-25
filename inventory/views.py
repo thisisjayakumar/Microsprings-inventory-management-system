@@ -384,7 +384,10 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
     ordering = ['material_code']
     
     def get_queryset(self):
-        """Optimize queryset - avoid prefetching heat_numbers if grn_receipt_id column doesn't exist"""
+        """Optimize queryset with prefetch_related to avoid N+1 queries"""
+        from django.db.models import Prefetch, Sum, Q
+        from django.db.models.functions import Coalesce
+        
         queryset = super().get_queryset()
         
         # Handle stock status filtering (in_stock, out_of_stock, no_stock_record)
@@ -431,8 +434,63 @@ class RawMaterialViewSet(viewsets.ModelViewSet):
                 # Materials with no stock record in either model
                 queryset = queryset.exclude(id__in=materials_with_any_stock_record)
         
-        # Don't prefetch heat_numbers to avoid database column issues
-        # The serializer will handle accessing heat_numbers individually
+        # Optimize with prefetch_related and annotations to avoid N+1 queries
+        # Only list action needs optimization (not create/update)
+        if self.action == 'list':
+            from manufacturing.models import RawMaterialAllocation
+            from django.db.models import Subquery, OuterRef, DecimalField
+            from django.db.models.functions import Coalesce
+            from decimal import Decimal
+            
+            # Annotate with reserved quantity to avoid N+1 queries
+            # Calculate sum of reserved + locked allocations for this material
+            reserved_subquery = RawMaterialAllocation.objects.filter(
+                raw_material=OuterRef('pk'),
+                status__in=['reserved', 'locked']
+            ).values('raw_material').annotate(
+                total=Sum('allocated_quantity_kg')
+            ).values('total')
+            
+            queryset = queryset.annotate(
+                _cached_reserved_quantity=Coalesce(
+                    Subquery(reserved_subquery),
+                    Decimal('0'),
+                    output_field=DecimalField(max_digits=10, decimal_places=3)
+                )
+            )
+            
+            # Prefetch heat stock balances
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'heat_stock_balances',
+                    queryset=RMStockBalanceHeat.objects.all()
+                )
+            )
+            
+            # Prefetch legacy stock balances
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'stock_balances',
+                    queryset=RMStockBalance.objects.all()
+                )
+            )
+            
+            # Prefetch heat numbers with their GRN receipts and raw_material
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'heat_numbers',
+                    queryset=HeatNumber.objects.filter(is_available=True).select_related(
+                        'grn_receipt', 'raw_material'
+                    ).only(
+                        'id', 'heat_number', 'raw_material_id', 'grn_receipt_id',
+                        'coils_received', 'sheets_received', 'total_weight_kg',
+                        'items', 'is_available', 'consumed_quantity_kg', 'created_at',
+                        # Also include raw_material fields for material_type access
+                        'raw_material__material_type'
+                    ).order_by('-created_at')
+                )
+            )
+        
         return queryset
     
     def get_permissions(self):

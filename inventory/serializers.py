@@ -31,16 +31,16 @@ class HeatNumberDetailSerializer(serializers.ModelSerializer):
         read_only_fields = fields
     
     def get_grn_number(self, obj):
-        """Safely get GRN number, handling missing grn_receipt relationship"""
+        """Safely get GRN number, using prefetched/selected data to avoid queries"""
         try:
-            # Try to access grn_receipt if it exists
+            # Try to access grn_receipt if it exists (should be select_related)
             if hasattr(obj, 'grn_receipt') and obj.grn_receipt:
                 return obj.grn_receipt.grn_number
-            # Try to get it via the foreign key ID if available
+            # Only query as last resort if foreign key ID is available
             if hasattr(obj, 'grn_receipt_id') and obj.grn_receipt_id:
                 from .models import GRNReceipt
                 try:
-                    grn = GRNReceipt.objects.get(id=obj.grn_receipt_id)
+                    grn = GRNReceipt.objects.only('grn_number').get(id=obj.grn_receipt_id)
                     return grn.grn_number
                 except GRNReceipt.DoesNotExist:
                     return None
@@ -54,11 +54,23 @@ class HeatNumberDetailSerializer(serializers.ModelSerializer):
     
     def get_available_coils(self, obj):
         """Get remaining available coils"""
-        return obj.get_available_coils() if obj.raw_material.material_type == 'coil' else None
+        # Access raw_material through prefetched data or select_related if possible
+        try:
+            material_type = obj.raw_material.material_type if hasattr(obj, 'raw_material') else None
+            return obj.get_available_coils() if material_type == 'coil' else None
+        except Exception:
+            return None
     
     def get_available_sheets(self, obj):
         """Get remaining available sheets"""
-        return obj.sheets_received if obj.raw_material.material_type == 'sheet' and obj.is_available else None
+        # Access raw_material through prefetched data or select_related if possible
+        try:
+            if hasattr(obj, 'raw_material'):
+                material_type = obj.raw_material.material_type
+                return obj.sheets_received if material_type == 'sheet' and obj.is_available else None
+            return None
+        except Exception:
+            return None
 
 
 class RawMaterialBasicSerializer(serializers.ModelSerializer):
@@ -85,24 +97,44 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
     def get_total_available_quantity(self, obj):
         """Get total available quantity from stock (before reservations)
         
+        Uses prefetched data to avoid N+1 queries.
+        
         Returns:
             - float: The total available quantity (0.0 if stock record exists but quantity is 0 or None)
             - None: If no stock record exists at all
         """
         # First check RMStockBalanceHeat (heat-tracked, more accurate)
-        from inventory.models import RMStockBalanceHeat
-        stock_balance_heat = RMStockBalanceHeat.objects.filter(raw_material=obj).first()
-        if stock_balance_heat:
-            # Stock record exists - return the quantity (0.0 if None or 0)
-            qty = stock_balance_heat.total_available_quantity_kg
-            return float(qty) if qty is not None else 0.0
+        # Use prefetched data if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'heat_stock_balances' in obj._prefetched_objects_cache:
+            # Use prefetched data
+            heat_stock_balances = obj._prefetched_objects_cache['heat_stock_balances']
+            if heat_stock_balances:
+                stock_balance_heat = heat_stock_balances[0]
+                qty = stock_balance_heat.total_available_quantity_kg
+                return float(qty) if qty is not None else 0.0
+        else:
+            # Fallback to query if not prefetched
+            from inventory.models import RMStockBalanceHeat
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(raw_material=obj).first()
+            if stock_balance_heat:
+                qty = stock_balance_heat.total_available_quantity_kg
+                return float(qty) if qty is not None else 0.0
         
         # Fallback to RMStockBalance (legacy)
-        stock_balance = RMStockBalance.objects.filter(raw_material=obj).first()
-        if stock_balance:
-            # Stock record exists - return the quantity (0.0 if None or 0)
-            qty = stock_balance.available_quantity
-            return float(qty) if qty is not None else 0.0
+        # Use prefetched data if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'stock_balances' in obj._prefetched_objects_cache:
+            # Use prefetched data
+            stock_balances = obj._prefetched_objects_cache['stock_balances']
+            if stock_balances:
+                stock_balance = stock_balances[0]
+                qty = stock_balance.available_quantity
+                return float(qty) if qty is not None else 0.0
+        else:
+            # Fallback to query if not prefetched
+            stock_balance = RMStockBalance.objects.filter(raw_material=obj).first()
+            if stock_balance:
+                qty = stock_balance.available_quantity
+                return float(qty) if qty is not None else 0.0
         
         # No stock record exists - return None
         return None
@@ -110,10 +142,17 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
     def get_reserved_quantity(self, obj):
         """Get total reserved quantity by all MOs (reserved + locked allocations)
         
+        Uses annotated data from queryset if available to avoid N+1 queries.
+        
         Returns:
             - float: Total reserved quantity in kg
         """
         try:
+            # Use annotated data if available (from optimized queryset)
+            if hasattr(obj, '_cached_reserved_quantity'):
+                return float(obj._cached_reserved_quantity)
+            
+            # Fallback to query if not annotated
             from manufacturing.models import RawMaterialAllocation
             from django.db.models import Sum
             from decimal import Decimal
@@ -156,24 +195,37 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
         return self.get_usable_quantity(obj)
     
     def get_heat_numbers(self, obj):
-        """Get heat numbers with coil/sheet details for this raw material"""
+        """Get heat numbers with coil/sheet details for this raw material
+        
+        Uses prefetched data to avoid N+1 queries.
+        """
         try:
-            # Query HeatNumber directly using raw_material_id, excluding grn_receipt_id
-            # Use .only() to only select columns that exist, avoiding grn_receipt_id
-            heat_numbers = HeatNumber.objects.filter(
-                raw_material_id=obj.id,
-                is_available=True
-            ).only(
-                'id', 'heat_number', 'raw_material_id',
-                'coils_received', 'sheets_received', 'total_weight_kg',
-                'items', 'is_available', 'consumed_quantity_kg', 'created_at'
-            ).order_by('-created_at')
-            
-            if not heat_numbers.exists():
-                return "NIL"
-            
-            serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
-            return serializer.data
+            # Use prefetched data if available
+            if hasattr(obj, '_prefetched_objects_cache') and 'heat_numbers' in obj._prefetched_objects_cache:
+                # Use prefetched data (already filtered by is_available=True and ordered)
+                heat_numbers = obj._prefetched_objects_cache['heat_numbers']
+                
+                if not heat_numbers:
+                    return "NIL"
+                
+                serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
+                return serializer.data
+            else:
+                # Fallback to query if not prefetched
+                heat_numbers = HeatNumber.objects.filter(
+                    raw_material_id=obj.id,
+                    is_available=True
+                ).select_related('grn_receipt').only(
+                    'id', 'heat_number', 'raw_material_id', 'grn_receipt_id',
+                    'coils_received', 'sheets_received', 'total_weight_kg',
+                    'items', 'is_available', 'consumed_quantity_kg', 'created_at'
+                ).order_by('-created_at')
+                
+                if not heat_numbers.exists():
+                    return "NIL"
+                
+                serializer = HeatNumberDetailSerializer(heat_numbers, many=True)
+                return serializer.data
         except Exception as e:
             # If querying heat_numbers fails due to missing database column,
             # return empty list or "NIL" instead of crashing
@@ -652,17 +704,9 @@ class GRNReceiptCreateSerializer(serializers.ModelSerializer):
         # Store resolved purchase orders for use in create()
         data['purchase_orders'] = purchase_orders
         
-        # Must provide either purchase_orders (for new GRN) or existing_grn_id (to add to existing)
-        if not purchase_orders and not existing_grn_id:
-            raise serializers.ValidationError({
-                'non_field_errors': 'Either provide purchase_orders for new GRN or existing_grn_id to add to existing GRN'
-            })
-        
-        # Cannot provide both
-        if purchase_orders and existing_grn_id:
-            raise serializers.ValidationError({
-                'non_field_errors': 'Cannot provide both purchase_orders and existing_grn_id. Choose one option.'
-            })
+        # Validation logic:
+        # - If existing_grn_id is provided: can optionally provide purchase_order_ids to add them to existing GRN
+        # - If existing_grn_id is NOT provided: MUST provide purchase_order_ids to create new GRN
         
         # If adding to existing GRN, validate it exists and is not cancelled
         if existing_grn_id:
@@ -672,20 +716,34 @@ class GRNReceiptCreateSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError({
                         'existing_grn_id': 'Cannot add PO to a cancelled GRN'
                     })
+                
+                # If purchase orders are provided, check they're not already in this GRN
+                if purchase_orders:
+                    for po in purchase_orders:
+                        if existing_grn.purchase_orders.filter(id=po.id).exists():
+                            raise serializers.ValidationError({
+                                'purchase_order_ids': f'Purchase Order {po.po_id} is already in this GRN'
+                            })
             except GRNReceipt.DoesNotExist:
                 raise serializers.ValidationError({
                     'existing_grn_id': 'GRN with this ID does not exist'
                 })
-        
-        # If creating new GRN, check if any PO already has an active GRN
-        if purchase_orders:
-            for po in purchase_orders:
-                if GRNReceipt.objects.filter(
-                    purchase_orders=po
-                ).exclude(status='cancelled').exists():
-                    raise serializers.ValidationError({
-                        'purchase_order_ids': f'An active GRN receipt already exists for Purchase Order {po.po_id}'
-                    })
+        else:
+            # Creating new GRN - must provide purchase orders
+            if not purchase_order_ids:
+                raise serializers.ValidationError({
+                    'purchase_order_ids': 'Purchase order IDs are required when creating a new GRN'
+                })
+            
+            # If creating new GRN, check if any PO already has an active GRN
+            if purchase_orders:
+                for po in purchase_orders:
+                    if GRNReceipt.objects.filter(
+                        purchase_orders=po
+                    ).exclude(status='cancelled').exists():
+                        raise serializers.ValidationError({
+                            'purchase_order_ids': f'An active GRN receipt already exists for Purchase Order {po.po_id}'
+                        })
         
         # Validate heat numbers data (required for new GRN, optional for adding to existing)
         if not existing_grn_id and not heat_numbers_data:

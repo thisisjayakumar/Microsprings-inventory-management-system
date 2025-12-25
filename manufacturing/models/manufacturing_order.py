@@ -409,9 +409,41 @@ class ManufacturingOrder(models.Model):
         return Decimal(str(total / 1000)) if total else Decimal('0')
     
     @property
+    def total_rm_returned_kg(self):
+        """Calculate total RM returned for this MO across all batches
+        Note: Excludes quality_defect returns (quarantined) - they are tracked separately"""
+        from manufacturing.models.rm_return import RMReturn
+        from django.db.models import Sum
+        # Only count non-quality_defect returns
+        non_quality_returns = RMReturn.objects.filter(
+            batch__mo=self
+        ).exclude(return_reason='quality_defect')
+        total = non_quality_returns.aggregate(total=Sum('returned_kg'))['total'] or 0
+        return Decimal(str(total)) if total else Decimal('0')
+    
+    @property
+    def total_rm_quarantined_kg(self):
+        """Calculate total RM quarantined (quality_defect returns) for this MO"""
+        from manufacturing.models.rm_return import RMReturn
+        from django.db.models import Sum
+        quality_returns = RMReturn.objects.filter(
+            batch__mo=self,
+            return_reason='quality_defect'
+        )
+        total = quality_returns.aggregate(total=Sum('returned_kg'))['total'] or 0
+        return Decimal(str(total)) if total else Decimal('0')
+    
+    @property
+    def total_rm_used_kg(self):
+        """Calculate actual RM used (Released - Returned) for this MO
+        Note: Quality defect returns are NOT subtracted - they are quarantined"""
+        return self.total_rm_released_kg - self.total_rm_returned_kg
+    
+    @property
     def remaining_rm_capacity_kg(self):
-        """Calculate remaining RM capacity before hitting the limit"""
-        return self.total_rm_limit_kg - self.total_rm_released_kg
+        """Calculate remaining RM capacity before hitting the limit
+        Based on USED RM, not released RM, so returned RM can be reused"""
+        return self.total_rm_limit_kg - self.total_rm_used_kg
     
     @property
     def is_rm_limit_exceeded(self):
@@ -420,14 +452,17 @@ class ManufacturingOrder(models.Model):
     
     @property
     def can_create_batch(self):
-        """Check if new batch can be created"""
+        """Check if new batch can be created
+        Based on USED RM, not released RM, so returned RM can be reused for new batches"""
         if self.rm_completion_status != 'active':
             return False
         
         if self.status not in ['on_hold', 'in_progress']:
             return False
         
-        return self.total_rm_released_kg < self.total_rm_limit_kg
+        # Use total_rm_used_kg instead of total_rm_released_kg
+        # This allows creating new batches with returned RM
+        return self.total_rm_used_kg < self.total_rm_limit_kg
     
     @property
     def should_show_request_additional_rm(self):

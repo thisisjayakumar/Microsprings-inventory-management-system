@@ -44,7 +44,14 @@ class RMReturn(models.Model):
     returned_kg = models.DecimalField(
         max_digits=10,
         decimal_places=3,
-        help_text="Quantity returned in kg"
+        help_text="Quantity returned in kg (actual quantity processed)"
+    )
+    user_entered_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        help_text="Quantity entered by user (for audit purposes, may differ from returned_kg for quality_defect)"
     )
     
     # Coil/Heat tracking
