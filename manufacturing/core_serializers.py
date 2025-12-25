@@ -148,6 +148,22 @@ class BatchListSerializer(serializers.ModelSerializer):
     completion_percentage = serializers.ReadOnlyField()
     is_overdue = serializers.ReadOnlyField()
     remaining_quantity = serializers.ReadOnlyField()
+    returned_coils = serializers.SerializerMethodField()
+    rm_returned_kg = serializers.DecimalField(max_digits=10, decimal_places=3, read_only=True)
+    rm_released_kg = serializers.ReadOnlyField()
+    rm_used_kg = serializers.ReadOnlyField()
+    released_coils = serializers.JSONField(read_only=True)
+    released_at = serializers.DateTimeField(read_only=True)
+
+    def get_returned_coils(self, obj):
+        """Get list of returned coils with heat_number, coil_number, and return_reason"""
+        from manufacturing.models.rm_return import RMReturn
+        # Include all return reasons for complete transaction history
+        # Frontend can filter based on return_reason if needed
+        returns = RMReturn.objects.filter(
+            batch=obj
+        ).values('heat_number', 'coil_number', 'returned_kg', 'return_reason', 'user_entered_kg', 'return_id')
+        return list(returns)
 
     class Meta:
         model = Batch
@@ -158,9 +174,10 @@ class BatchListSerializer(serializers.ModelSerializer):
             'completion_percentage', 'remaining_quantity', 'assigned_operator',
             'assigned_operator_name', 'assigned_supervisor', 'assigned_supervisor_name',
             'planned_start_date', 'planned_end_date', 'actual_start_date', 'actual_end_date',
-            'is_overdue', 'created_at', 'updated_at'
+            'is_overdue', 'created_at', 'updated_at', 'released_coils', 'returned_coils',
+            'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
         ]
-        read_only_fields = ['batch_id', 'created_at', 'updated_at']
+        read_only_fields = ['batch_id', 'created_at', 'updated_at', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg']
 
 
 class BatchMinimalSerializer(serializers.ModelSerializer):

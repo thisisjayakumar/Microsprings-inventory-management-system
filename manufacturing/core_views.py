@@ -3255,6 +3255,8 @@ class BatchViewSet(viewsets.ModelViewSet):
                 'planned_quantity': batch.planned_quantity,  # in grams
                 'rm_base_kg': float(batch_rm_base_kg),
                 'rm_released': float(batch_rm),
+                'rm_returned_kg': float(batch.rm_returned_kg or 0),  # Include rm_returned_kg from batch model (includes quality_defect)
+                'rm_quarantined_kg': float(batch_quarantined_kg),  # Quality defect returns (for reference)
                 'scrap_rm_kg': float(batch_scrap_kg),
                 'status': batch.status,
                 'created_at': batch.created_at

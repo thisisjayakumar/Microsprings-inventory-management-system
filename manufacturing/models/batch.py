@@ -160,8 +160,8 @@ class Batch(models.Model):
             batch=self
         ).exclude(return_reason='quality_defect')
         returned = sum(float(r.returned_kg) for r in non_quality_returns) if non_quality_returns.exists() else 0
-        # Fallback to batch.rm_returned_kg if no returns found (for backward compatibility)
-        if returned == 0:
-            returned = float(self.rm_returned_kg) if self.rm_returned_kg else 0
+        # NOTE: Do NOT use batch.rm_returned_kg as fallback because it now includes quality_defect returns
+        # batch.rm_returned_kg is used for tracking total returned (including quarantined), but
+        # rm_used_kg should only subtract non-quality_defect returns
         return released - returned
 

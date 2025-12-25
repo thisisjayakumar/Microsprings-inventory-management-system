@@ -276,7 +276,10 @@ class RMReturnCreateSerializer(serializers.Serializer):
                         # Use 0 for triggering coil since it's not available
                         triggering_coil_weight = Decimal('0')
                     
-                    # Use the sum of individual coil weights for batch returned quantity
+                    # For quality defect quarantine, use the sum of all available coils in the heat number
+                    # This represents the total RM that is being quarantined from this batch's heat number
+                    # We use total_coils_weight (sum of available coils) because we can only quarantine what's available
+                    # The batch.rm_returned_kg will be updated with this total to reflect all quarantined RM
                     actual_returned_total = total_coils_weight if total_coils_weight > 0 else available_quantity
                     
                     # For quality defect, update returned_kg based on whether triggering coil is in items
@@ -302,13 +305,14 @@ class RMReturnCreateSerializer(serializers.Serializer):
                             f"No available quantity for triggering coil {coil_number} in heat number {heat_number}."
                         )
                     
-                    # DO NOT update batch.rm_returned_kg for quality_defect returns
-                    # Quality defect returns are quarantined and should NOT be counted in batch returned quantity
-                    # They are completely removed from available stock and don't affect used RM calculations
-                    # The batch summary endpoint will calculate quarantined RM separately by querying RMReturn records
+                    # IMPORTANT: For quality defect returns, we do NOT update batch.rm_returned_kg
+                    # Quality defect RM is NOT counted as "used RM" or "returned RM" in normal calculations
+                    # It is tracked separately in RMReturn records and displayed in a separate "Quality Defected RM" section
+                    # This ensures that quality defects don't affect Used RM and Returned RM calculations
                     logger.info(
-                        f"Quality defect return: NOT updating batch.rm_returned_kg. "
-                        f"Quarantined RM ({actual_returned_total}kg) will be tracked separately in batch summary."
+                        f"Quality defect return: Quarantined {actual_returned_total}kg from heat {heat_number}. "
+                        f"NOT updating batch.rm_returned_kg (quality defects are tracked separately). "
+                        f"Batch: {batch.batch_id}, Total quarantined: {actual_returned_total}kg, Coils: {len(available_coils)}"
                     )
                     
                     # Update the original return record (for the triggering coil) if it still exists
@@ -347,10 +351,12 @@ class RMReturnCreateSerializer(serializers.Serializer):
                     # This ensures each coil has its own audit trail in the transaction log
                     # IMPORTANT: Only create records for coils that are actually in the items array (available)
                     created_return_ids = []
+                    first_created_return = None  # Track first created return for return value if rm_return is None
                     
                     if rm_return:
                         # Main return record exists (triggering coil was in items)
                         created_return_ids.append(rm_return.return_id)
+                        first_created_return = rm_return  # Use main return as first
                     
                     # Create records for all available coils
                     # If triggering coil was in items, skip it (already has a record)
@@ -382,6 +388,10 @@ class RMReturnCreateSerializer(serializers.Serializer):
                         )
                         created_return_ids.append(other_rm_return.return_id)
                         
+                        # Track first created return for return value if rm_return is None
+                        if first_created_return is None:
+                            first_created_return = other_rm_return
+                        
                         logger.info(
                             f"Created quality defect return record for coil {other_coil_number} "
                             f"(heat {heat_number}): Return ID {other_rm_return.return_id}, "
@@ -397,8 +407,6 @@ class RMReturnCreateSerializer(serializers.Serializer):
                     # Update stock balances
                     heat_obj.update_stock_balance()
                     
-                    # Also update basic RMStockBalance
-                    from inventory.models import RMStockBalance
                     try:
                         stock_balance = RMStockBalance.objects.get(raw_material=heat_obj.raw_material)
                         total_available = sum(
@@ -450,10 +458,32 @@ class RMReturnCreateSerializer(serializers.Serializer):
                 except HeatNumber.DoesNotExist:
                     logger.warning(f"Heat number {heat_number} not found for quality defect processing")
                 
-                # Mark as processed
-                rm_return.is_processed = True
-                rm_return.processed_at = timezone.now()
-                rm_return.save(update_fields=['is_processed', 'processed_at'])
+                # Mark as processed (only if rm_return still exists - it may have been deleted if triggering coil was not in items)
+                if rm_return:
+                    rm_return.is_processed = True
+                    rm_return.processed_at = timezone.now()
+                    rm_return.save(update_fields=['is_processed', 'processed_at'])
+                else:
+                    logger.info(
+                        f"Main return record was deleted (triggering coil not in items). "
+                        f"Individual coil return records were already marked as processed during creation."
+                    )
+                
+                # Return the first created return record (or rm_return if it exists)
+                # This ensures we always return a valid RMReturn object
+                if rm_return:
+                    return rm_return
+                elif first_created_return:
+                    return first_created_return
+                else:
+                    # This should not happen, but handle edge case where no return records were created
+                    logger.error(
+                        f"No return records were created for quality defect return. "
+                        f"Triggering coil: {coil_number}, Heat: {heat_number}, Batch: {batch.batch_id}"
+                    )
+                    raise serializers.ValidationError(
+                        "Failed to create return record. No available coils found to quarantine."
+                    )
                 
             elif return_reason in ['left_over', 'wrong_rm']:
                 # Left Over / Wrong RM: Add back to stock with same heat/coil
