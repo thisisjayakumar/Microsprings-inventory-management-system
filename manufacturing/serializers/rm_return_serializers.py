@@ -23,13 +23,14 @@ class RMReturnSerializer(serializers.ModelSerializer):
     material_code = serializers.SerializerMethodField()
     material_name = serializers.SerializerMethodField()
     grn_number = serializers.SerializerMethodField()
+    coil_weight_kg = serializers.SerializerMethodField()
     
     class Meta:
         model = RMReturn
         fields = [
             'id', 'return_id', 'batch', 'batch_id', 'mo', 'mo_id',
             'return_reason', 'return_reason_display', 'returned_kg', 'user_entered_kg',
-            'heat_number', 'coil_number', 'material_code', 'material_name',
+            'heat_number', 'coil_number', 'coil_weight_kg', 'material_code', 'material_name',
             'grn_number', 'notes', 'is_processed',
             'processed_at', 'created_at', 'created_by', 'created_by_name'
         ]
@@ -60,6 +61,35 @@ class RMReturnSerializer(serializers.ModelSerializer):
                     return heat_obj.grn_number
         except Exception:
             pass
+        return None
+    
+    def get_coil_weight_kg(self, obj):
+        """Get the original coil weight from heat number or batch released_coils
+        For quality defect returns, this shows the coil's full weight for unreleased coils"""
+        try:
+            # First try to get from batch released_coils (for released coils)
+            if obj.batch and obj.batch.released_coils:
+                for coil in obj.batch.released_coils:
+                    if (coil.get('coil_number') == obj.coil_number and 
+                        coil.get('heat_number') == obj.heat_number):
+                        return float(coil.get('weight', 0))
+            
+            # If not found in released_coils, try heat number items (for unreleased coils)
+            if obj.mo and obj.mo.product_code and obj.mo.product_code.material:
+                material_code = obj.mo.product_code.material.material_code
+                heat_obj = HeatNumber.objects.filter(
+                    heat_number=obj.heat_number,
+                    raw_material__material_code=material_code
+                ).first()
+                
+                if heat_obj and heat_obj.items:
+                    for item in heat_obj.items:
+                        item_coil = item.get('coil_number') or item.get('number', '')
+                        if item_coil == obj.coil_number:
+                            return float(item.get('weight') or item.get('weight_kg', 0))
+        except Exception as e:
+            logger.warning(f"Failed to get coil weight for {obj.coil_number}: {str(e)}")
+        
         return None
 
 
@@ -129,7 +159,7 @@ class RMReturnCreateSerializer(serializers.Serializer):
                     f"Coil {coil_number} from Heat {heat_number} was not released in this batch"
                 )
             
-            # For quality defect, we don't validate quantity (entire heat number is quarantined)
+            # For quality defect, we don't validate quantity (entire heat number is marked as defective)
             if return_reason != 'quality_defect':
                 # Validate returned quantity doesn't exceed released quantity
                 # Calculate already returned quantity for this coil
@@ -180,20 +210,20 @@ class RMReturnCreateSerializer(serializers.Serializer):
         user_entered_kg = Decimal(str(returned_kg))
         
         with transaction.atomic():
-            # Prepare notes for quality_defect to indicate entire heat number quarantine
+            # Prepare notes for quality_defect to indicate entire heat number is affected
             # Note: For quality_defect, we'll update returned_kg after calculating available quantity
             notes = validated_data.get('notes', '')
             if return_reason == 'quality_defect':
                 # We'll update the notes after we know the actual returned quantity
                 # For now, just prepare the base note
                 if notes:
-                    notes += f"\n\n⚠️ QUALITY DEFECT: Entire heat number {heat_number} has been quarantined. "
+                    notes += f"\n\n⚠️ QUALITY DEFECT: Entire heat number {heat_number} marked as defective. "
                 else:
-                    notes = f"⚠️ QUALITY DEFECT: Entire heat number {heat_number} has been quarantined. "
-                notes += f"All available coils under this heat number are being returned. "
-                notes += f"This return (coil {coil_number}) triggered the quarantine. "
-                notes += f"User entered: {user_entered_kg}kg. "
-                notes += f"Actual returned kg will reflect the complete available quantity of the heat number."
+                    notes = f"⚠️ QUALITY DEFECT: Entire heat number {heat_number} marked as defective. "
+                notes += f"All available coils under this heat number are being removed from stock. "
+                notes += f"This return (coil {coil_number}) triggered the defect. "
+                notes += f"User entered: {user_entered_kg}kg (actual weight of released coil). "
+                notes += f"Other unreleased coils will be recorded separately with 0kg returned."
             
             # Create RM return record
             # Store both user_entered_kg (for audit) and returned_kg (will be updated for quality_defect)
@@ -218,9 +248,12 @@ class RMReturnCreateSerializer(serializers.Serializer):
             
             # Process based on return reason
             if return_reason == 'quality_defect':
-                # Quality Defect: Remove entire heat number from stock (quarantine all coils)
-                # For quality defect, we return ALL available quantity in the heat number,
-                # not just what the user entered
+                # Quality Defect: Mark batch and remove entire heat number from stock
+                # Mark the batch as having quality defect (will exclude from RM calculations)
+                batch.has_quality_defect = True
+                batch.save(update_fields=['has_quality_defect'])
+                
+                # For quality defect, we process ALL available coils in the heat number
                 try:
                     # Get material_code from MO -> product_code -> material
                     material_code = mo.product_code.material.material_code if mo.product_code and mo.product_code.material else None
@@ -267,83 +300,52 @@ class RMReturnCreateSerializer(serializers.Serializer):
                             break
                     
                     # If triggering coil not found in items, it means it was already consumed/released
-                    # In this case, we should only quarantine the coils that are actually available
                     if triggering_coil_weight is None:
                         logger.warning(
                             f"Triggering coil {coil_number} not found in heat number {heat_number} items. "
-                            f"This coil was already consumed/released. Only available coils will be quarantined."
+                            f"This coil was already consumed/released."
                         )
-                        # Use 0 for triggering coil since it's not available
-                        triggering_coil_weight = Decimal('0')
+                        # Use released_coil_weight from batch for the triggering coil
+                        triggering_coil_weight = released_coil_weight
                     
-                    # For quality defect quarantine, use the sum of all available coils in the heat number
-                    # This represents the total RM that is being quarantined from this batch's heat number
-                    # We use total_coils_weight (sum of available coils) because we can only quarantine what's available
-                    # The batch.rm_returned_kg will be updated with this total to reflect all quarantined RM
-                    actual_returned_total = total_coils_weight if total_coils_weight > 0 else available_quantity
-                    
-                    # For quality defect, update returned_kg based on whether triggering coil is in items
-                    # If triggering coil is in items: use its weight, and create records for other coils
-                    # If triggering coil is NOT in items: delete the main return record and only create records for available coils
-                    # This avoids double-counting in quarantined calculation
-                    if triggering_coil_in_items and triggering_coil_weight > 0:
-                        # Triggering coil is in items - use its weight for main record
-                        rm_return.returned_kg = triggering_coil_weight  # Triggering coil's actual weight
+                    # For quality defect, the main return record shows the USER ENTERED kg value
+                    # This represents what the user actually returned from the released coil
+                    # Update returned_kg to user_entered_kg (what user actually returned)
+                    if triggering_coil_in_items:
+                        # Triggering coil is in items - use user entered kg
+                        rm_return.returned_kg = user_entered_kg  # User's entered value
                         rm_return.save(update_fields=['returned_kg'])
-                    elif not triggering_coil_in_items and actual_returned_total > 0:
-                        # Triggering coil not in items (was already consumed)
-                        # Delete the main return record since it references a coil that doesn't exist
-                        # We'll create records only for available coils below
-                        rm_return.delete()
-                        rm_return = None  # Mark as deleted
-                        logger.info(
-                            f"Triggering coil {coil_number} not in items (already consumed). "
-                            f"Deleted main return record. Will create records only for available coils: {actual_returned_total}kg total"
-                        )
                     else:
-                        logger.warning(
-                            f"No available quantity for triggering coil {coil_number} in heat number {heat_number}."
+                        # Triggering coil not in items (already consumed/released)
+                        # Keep the main return record with user entered kg
+                        # The triggering coil is the released one, so it has actual returned kg
+                        logger.info(
+                            f"Triggering coil {coil_number} was released from batch (not in items anymore). "
+                            f"Keeping return record with user entered kg: {user_entered_kg}kg"
                         )
                     
-                    # IMPORTANT: For quality defect returns, we do NOT update batch.rm_returned_kg
-                    # Quality defect RM is NOT counted as "used RM" or "returned RM" in normal calculations
-                    # It is tracked separately in RMReturn records and displayed in a separate "Quality Defected RM" section
-                    # This ensures that quality defects don't affect Used RM and Returned RM calculations
+                    # IMPORTANT: For quality defect batches, the batch is excluded from RM calculations
+                    # Quality defect RM is tracked separately via has_quality_defect flag
+                    # This ensures that quality defects don't affect Used RM and Released RM calculations
                     logger.info(
-                        f"Quality defect return: Quarantined {actual_returned_total}kg from heat {heat_number}. "
-                        f"NOT updating batch.rm_returned_kg (quality defects are tracked separately). "
-                        f"Batch: {batch.batch_id}, Total quarantined: {actual_returned_total}kg, Coils: {len(available_coils)}"
+                        f"Quality defect batch: {batch.batch_id} marked as has_quality_defect=True. "
+                        f"Batch will be excluded from Released RM calculations. "
+                        f"Triggering coil {coil_number} returned: {user_entered_kg}kg. "
+                        f"Heat {heat_number} has {len(available_coils)} available coils to process."
                     )
                     
-                    # Update the original return record (for the triggering coil) if it still exists
+                    # Update the original return record notes if it still exists
                     if rm_return:
                         updated_notes = rm_return.notes or ''
-                        if available_coils:
-                            coil_list = ', '.join([f"{c['coil_number']} ({c['weight']}kg)" for c in available_coils])
-                            if 'Actual returned kg will reflect' in updated_notes:
+                        other_coils_list = [c for c in available_coils if c['coil_number'] != coil_number]
+                        if other_coils_list:
+                            coil_list = ', '.join([f"{c['coil_number']} ({c['weight']}kg)" for c in other_coils_list])
+                            if 'Other unreleased coils will be recorded' in updated_notes:
                                 updated_notes = updated_notes.replace(
-                                    'Actual returned kg will reflect the complete available quantity of the heat number.',
-                                    f'Entire heat number quarantined. All coils returned: {coil_list}. Total: {actual_returned_total}kg. '
-                                    f'This coil ({coil_number}) returned: {triggering_coil_weight}kg.'
+                                    'Other unreleased coils will be recorded separately with 0kg returned.',
+                                    f'Other coils in heat number: {coil_list}. '
+                                    f'These coils were not released and will show 0kg returned.'
                                 )
-                            else:
-                                if updated_notes:
-                                    updated_notes += f"\n\nEntire heat number quarantined. All coils returned: {coil_list}. Total: {actual_returned_total}kg. "
-                                    updated_notes += f"This coil ({coil_number}) returned: {triggering_coil_weight}kg."
-                                else:
-                                    updated_notes = f"User entered: {rm_return.user_entered_kg}kg. Entire heat number quarantined. All coils returned: {coil_list}. Total: {actual_returned_total}kg. "
-                                    updated_notes += f"This coil ({coil_number}) returned: {triggering_coil_weight}kg."
-                        else:
-                            if 'Actual returned kg will reflect' in updated_notes:
-                                updated_notes = updated_notes.replace(
-                                    'Actual returned kg will reflect the complete available quantity of the heat number.',
-                                    f'Actual returned: {triggering_coil_weight}kg (this coil\'s available quantity).'
-                                )
-                            else:
-                                if updated_notes:
-                                    updated_notes += f"\n\nActual returned: {triggering_coil_weight}kg (this coil's available quantity)."
-                                else:
-                                    updated_notes = f"User entered: {rm_return.user_entered_kg}kg. Actual returned: {triggering_coil_weight}kg (this coil's available quantity)."
                         rm_return.notes = updated_notes
                         rm_return.save(update_fields=['notes'])
                     
@@ -358,30 +360,30 @@ class RMReturnCreateSerializer(serializers.Serializer):
                         created_return_ids.append(rm_return.return_id)
                         first_created_return = rm_return  # Use main return as first
                     
-                    # Create records for all available coils
-                    # If triggering coil was in items, skip it (already has a record)
-                    # If triggering coil was NOT in items, create records for all available coils
+                    # Create records for all OTHER available coils (not the triggering one)
+                    # These coils were NOT released, so returned_kg = 0
                     for coil_data in available_coils:
                         other_coil_number = coil_data['coil_number']
                         other_coil_weight = coil_data['weight']
                         
-                        # Skip if this is the triggering coil AND it was in items (already has a record)
-                        if other_coil_number == coil_number and triggering_coil_in_items:
+                        # Skip if this is the triggering coil (already has a record)
+                        if other_coil_number == coil_number:
                             continue
                         
-                        # Create RMReturn record for this coil with its actual weight
+                        # Create RMReturn record for this unreleased coil
+                        # returned_kg = 0 (not released), but track the coil's weight for reference
                         other_rm_return = RMReturn.objects.create(
                             batch=batch,
                             mo=mo,
                             return_reason=return_reason,
-                            returned_kg=other_coil_weight,  # This coil's actual available weight
-                            user_entered_kg=user_entered_kg,  # Same user input for all
+                            returned_kg=Decimal('0'),  # Not released, so 0kg returned
+                            user_entered_kg=user_entered_kg,  # Same user input for reference
                             heat_number=heat_number,
                             coil_number=other_coil_number,
-                            notes=f"⚠️ QUALITY DEFECT: Quarantined as part of heat number {heat_number} quality defect. "
-                                  f"Triggered by coil {coil_number} return (user entered: {user_entered_kg}kg). "
-                                  + (f"Note: Triggering coil {coil_number} was already consumed/released. " if not triggering_coil_in_items else "") +
-                                  f"Coil {other_coil_number} actual returned: {other_coil_weight}kg (original available quantity).",
+                            notes=f"⚠️ QUALITY DEFECT: Marked as defective as part of heat number {heat_number}. "
+                                  f"Triggered by coil {coil_number} return (user entered: {user_entered_kg}kg from released coil). "
+                                  f"This coil ({other_coil_number}, weight: {other_coil_weight}kg) was NOT released to any batch. "
+                                  f"Returned kg = 0 (unreleased coil removed from stock).",
                             is_processed=True,
                             processed_at=timezone.now(),
                             created_by=self.context['request'].user
@@ -393,13 +395,13 @@ class RMReturnCreateSerializer(serializers.Serializer):
                             first_created_return = other_rm_return
                         
                         logger.info(
-                            f"Created quality defect return record for coil {other_coil_number} "
-                            f"(heat {heat_number}): Return ID {other_rm_return.return_id}, "
-                            f"Actual returned: {other_coil_weight}kg (original available quantity)"
+                            f"Created quality defect record for unreleased coil {other_coil_number} "
+                            f"(heat {heat_number}, weight: {other_coil_weight}kg): Return ID {other_rm_return.return_id}, "
+                            f"Returned kg: 0 (unreleased coil)"
                         )
                     
                     # Mark entire heat number as consumed and unavailable
-                    # This quarantines all coils in the heat number
+                    # This removes all coils from available stock
                     heat_obj.consumed_quantity_kg = total_weight
                     heat_obj.is_available = False
                     heat_obj.save(update_fields=['consumed_quantity_kg', 'is_available'])
@@ -434,25 +436,22 @@ class RMReturnCreateSerializer(serializers.Serializer):
                     
                     # Note: Inventory transaction creation is skipped for quality_defect returns
                     # because InventoryTransaction model requires a Product, but we're dealing with RawMaterial.
-                    # The RMReturn record itself serves as the audit trail and will appear in the Return RM tab.
-                    # The heat number quarantine (is_available=False) and consumed_quantity_kg update
+                    # The RMReturn records serve as the audit trail and will appear in the Return RM tab.
+                    # The heat number removal (is_available=False) and consumed_quantity_kg update
                     # provide the stock adjustment tracking.
                     logger.info(
-                        f"Quality defect return logged: {len(created_return_ids)} return record(s) created. "
+                        f"Quality defect processed: {len(created_return_ids)} return record(s) created. "
                         f"Return IDs: {', '.join(created_return_ids) if created_return_ids else 'N/A'}. "
-                        f"Entire heat number {heat_number} quarantined. "
-                        f"Total weight: {total_weight}kg, Available (returned): {actual_returned_total}kg, "
-                        f"Previously consumed: {old_consumed}kg. "
-                        f"Coils quarantined: {len(available_coils)} coil(s). "
-                        f"Triggering coil in items: {triggering_coil_in_items}"
+                        f"Entire heat number {heat_number} removed from stock. "
+                        f"Total heat weight: {total_weight}kg, Previously consumed: {old_consumed}kg. "
+                        f"Available coils processed: {len(available_coils)} coil(s)."
                     )
                     
                     logger.info(
-                        f"Heat number {heat_number} quarantined due to quality defect. "
-                        f"Batch: {batch.batch_id}, Triggering coil: {coil_number}. "
+                        f"Heat number {heat_number} marked as unavailable due to quality defect. "
+                        f"Batch: {batch.batch_id} (marked has_quality_defect=True), Triggering coil: {coil_number}. "
                         f"Consumed: {old_consumed} -> {total_weight}kg (entire heat number). "
-                        f"Total quarantined: {actual_returned_total}kg across {len(available_coils)} available coil(s). "
-                        f"All available coils now have individual return records in transaction log."
+                        f"All coils now have individual return records in Return RM tab."
                     )
                     
                 except HeatNumber.DoesNotExist:
@@ -469,20 +468,18 @@ class RMReturnCreateSerializer(serializers.Serializer):
                         f"Individual coil return records were already marked as processed during creation."
                     )
                 
-                # Return the first created return record (or rm_return if it exists)
-                # This ensures we always return a valid RMReturn object
+                # Return the main return record
+                # This is the triggering coil's return record
                 if rm_return:
                     return rm_return
-                elif first_created_return:
-                    return first_created_return
                 else:
-                    # This should not happen, but handle edge case where no return records were created
+                    # This should not happen since we always keep the triggering coil's record
                     logger.error(
-                        f"No return records were created for quality defect return. "
+                        f"No return record for triggering coil. "
                         f"Triggering coil: {coil_number}, Heat: {heat_number}, Batch: {batch.batch_id}"
                     )
                     raise serializers.ValidationError(
-                        "Failed to create return record. No available coils found to quarantine."
+                        "Failed to create return record for triggering coil."
                     )
                 
             elif return_reason in ['left_over', 'wrong_rm']:

@@ -403,40 +403,39 @@ class ManufacturingOrder(models.Model):
     
     @property
     def total_rm_released_kg(self):
-        """Calculate total RM released for this MO across all batches"""
+        """Calculate total RM released for this MO across all batches
+        Excludes batches with quality defects"""
         from django.db.models import Sum
-        total = self.batches.aggregate(total=Sum('planned_quantity'))['total'] or 0
+        total = self.batches.filter(has_quality_defect=False).aggregate(total=Sum('planned_quantity'))['total'] or 0
         return Decimal(str(total / 1000)) if total else Decimal('0')
     
     @property
     def total_rm_returned_kg(self):
         """Calculate total RM returned for this MO across all batches
-        Note: Excludes quality_defect returns (quarantined) - they are tracked separately"""
+        Note: Excludes quality_defect returns - they are tracked separately"""
         from manufacturing.models.rm_return import RMReturn
         from django.db.models import Sum
-        # Only count non-quality_defect returns
+        # Only count non-quality_defect returns from non-quality_defect batches
         non_quality_returns = RMReturn.objects.filter(
-            batch__mo=self
+            batch__mo=self,
+            batch__has_quality_defect=False
         ).exclude(return_reason='quality_defect')
         total = non_quality_returns.aggregate(total=Sum('returned_kg'))['total'] or 0
         return Decimal(str(total)) if total else Decimal('0')
     
     @property
-    def total_rm_quarantined_kg(self):
-        """Calculate total RM quarantined (quality_defect returns) for this MO"""
-        from manufacturing.models.rm_return import RMReturn
+    def total_rm_quality_defect_kg(self):
+        """Calculate total RM from quality defect batches for this MO
+        This represents RM that was released but later found to have quality defects"""
         from django.db.models import Sum
-        quality_returns = RMReturn.objects.filter(
-            batch__mo=self,
-            return_reason='quality_defect'
-        )
-        total = quality_returns.aggregate(total=Sum('returned_kg'))['total'] or 0
-        return Decimal(str(total)) if total else Decimal('0')
+        # Sum planned_quantity from all quality defect batches
+        total = self.batches.filter(has_quality_defect=True).aggregate(total=Sum('planned_quantity'))['total'] or 0
+        return Decimal(str(total / 1000)) if total else Decimal('0')
     
     @property
     def total_rm_used_kg(self):
         """Calculate actual RM used (Released - Returned) for this MO
-        Note: Quality defect returns are NOT subtracted - they are quarantined"""
+        Note: Quality defect batches are excluded from both released and returned calculations"""
         return self.total_rm_released_kg - self.total_rm_returned_kg
     
     @property

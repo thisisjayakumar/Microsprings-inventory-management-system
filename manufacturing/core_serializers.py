@@ -1299,9 +1299,9 @@ class BatchDetailSerializer(serializers.ModelSerializer):
             'assigned_operator_id', 'assigned_supervisor', 'assigned_supervisor_id',
             'total_processing_time_minutes', 'notes', 'completion_percentage',
             'is_overdue', 'remaining_quantity', 'created_by', 'created_at', 'updated_at',
-            'selected_coils', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg'
+            'selected_coils', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg', 'rm_released_kg', 'rm_used_kg', 'has_quality_defect'
         ]
-        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg']
+        read_only_fields = ['batch_id', 'mo', 'product_code', 'created_at', 'updated_at', 'released_coils', 'returned_coils', 'released_at', 'rm_returned_kg', 'has_quality_defect']
     
     def to_representation(self, instance):
         """Optimize response for create operations - exclude heavy nested data"""
