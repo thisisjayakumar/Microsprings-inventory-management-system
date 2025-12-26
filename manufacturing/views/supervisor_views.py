@@ -278,12 +278,11 @@ class ProcessStopViewSet(viewsets.ModelViewSet):
         # Create notifications
         for user in list(ph_users) + list(manager_users):
             WorkflowNotification.objects.create(
-                user=user,
+                recipient=user,
                 notification_type='process_stopped',
                 title='Process Stopped',
                 message=message,
-                related_mo=process_stop.mo,
-                action_url=f'/production-head/mo-detail/{process_stop.mo.id}'
+                related_mo=process_stop.mo
             )
     
     def _send_resume_notifications(self, process_stop):
@@ -305,12 +304,11 @@ class ProcessStopViewSet(viewsets.ModelViewSet):
         
         for user in list(ph_users) + list(manager_users):
             WorkflowNotification.objects.create(
-                user=user,
+                recipient=user,
                 notification_type='process_resumed',
                 title='Process Resumed',
                 message=message,
-                related_mo=process_stop.mo,
-                action_url=f'/production-head/mo-detail/{process_stop.mo.id}'
+                related_mo=process_stop.mo
             )
 
 
@@ -559,12 +557,11 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             # Notify next supervisor
             if next_process.assigned_supervisor:
                 WorkflowNotification.objects.create(
-                    user=next_process.assigned_supervisor,
+                    recipient=next_process.assigned_supervisor,
                     notification_type='batch_received',
                     title='Batch Received',
                     message=f"Batch {batch.batch_id} received from {current_process_execution.process.name} - {ok_quantity_kg} kg",
-                    related_mo=batch.mo,
-                    action_url=f'/supervisor/mo-detail/{batch.mo.id}'
+                    related_mo=batch.mo
                 )
 
 
@@ -621,11 +618,12 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
-        """Complete rework batch with OK/Scrap quantities"""
+        """Complete rework batch with OK/Scrap/Rework quantities"""
         rework_batch = self.get_object()
         
         ok_kg = request.data.get('ok_kg')
         scrap_kg = request.data.get('scrap_kg')
+        rework_kg = request.data.get('rework_kg', 0)  # Optional, defaults to 0
         
         if ok_kg is None or scrap_kg is None:
             return Response(
@@ -635,9 +633,10 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
         
         try:
             with transaction.atomic():
-                completion = rework_batch.complete_rework(
+                completion, updated_rework_batch = rework_batch.complete_rework(
                     ok_kg=Decimal(str(ok_kg)),
-                    scrap_kg=Decimal(str(scrap_kg))
+                    scrap_kg=Decimal(str(scrap_kg)),
+                    rework_kg=Decimal(str(rework_kg))
                 )
                 
                 # Move OK to next process
@@ -645,18 +644,31 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                     next_process = rework_batch.process_execution.get_next_process_execution()
                     if next_process and next_process.assigned_supervisor:
                         WorkflowNotification.objects.create(
-                            user=next_process.assigned_supervisor,
+                            recipient=next_process.assigned_supervisor,
                             notification_type='rework_completed',
                             title='Rework Completed',
                             message=f"Rework batch {rework_batch.original_batch.batch_id} completed - {ok_kg} kg OK",
-                            related_mo=rework_batch.original_batch.mo,
-                            action_url=f'/supervisor/mo-detail/{rework_batch.original_batch.mo.id}'
+                            related_mo=rework_batch.original_batch.mo
                         )
+                
+                # Build response data
+                # If updated_rework_batch exists, it's the same batch updated for next cycle (stays in_progress)
+                # Otherwise, rework_batch is now completed
+                response_data = {
+                    'message': 'Rework completed successfully',
+                    'completion': BatchProcessCompletionSerializer(completion).data,
+                }
+                
+                if updated_rework_batch:
+                    # Same batch updated for next cycle (in_progress with updated cycle number)
+                    response_data['rework_batch'] = ReworkBatchSerializer(updated_rework_batch).data
+                    response_data['message'] = f'Rework cycle updated. Batch continues to cycle {updated_rework_batch.rework_cycle_number}'
+                else:
+                    # Batch marked as completed
+                    rework_batch.refresh_from_db()
+                    response_data['rework_batch'] = ReworkBatchSerializer(rework_batch).data
             
-            return Response(
-                {'message': 'Rework completed successfully', 'completion': BatchProcessCompletionSerializer(completion).data},
-                status=status.HTTP_200_OK
-            )
+            return Response(response_data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response(
                 {'error': str(e)},
@@ -746,12 +758,11 @@ class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):
             
             for user in ph_users:
                 WorkflowNotification.objects.create(
-                    user=user,
+                    recipient=user,
                     notification_type='batch_reported',
                     title='Batch Issue Reported',
                     message=f"Batch {batch.batch_id} reported by {request.user.get_full_name()} - {verification.get_report_reason_display()}",
-                    related_mo=batch.mo,
-                    action_url=f'/production-head/mo-detail/{batch.mo.id}'
+                    related_mo=batch.mo
                 )
         
         return Response(
@@ -779,12 +790,11 @@ class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):
             # Notify supervisor
             if verification.process_execution.assigned_supervisor:
                 WorkflowNotification.objects.create(
-                    user=verification.process_execution.assigned_supervisor,
+                    recipient=verification.process_execution.assigned_supervisor,
                     notification_type='hold_cleared',
                     title='Hold Cleared',
                     message=f"Hold cleared for batch {verification.batch.batch_id} - ready to process",
-                    related_mo=verification.batch.mo,
-                    action_url=f'/supervisor/mo-detail/{verification.batch.mo.id}'
+                    related_mo=verification.batch.mo
                 )
             
             return Response(
@@ -895,12 +905,11 @@ class FinalInspectionReworkViewSet(viewsets.ModelViewSet):
             
             # Notify assigned supervisor
             WorkflowNotification.objects.create(
-                user=fi_rework.assigned_to_supervisor,
+                recipient=fi_rework.assigned_to_supervisor,
                 notification_type='fi_rework_assigned',
                 title='FI Rework Assigned',
                 message=f"Rework batch {batch.batch_id} assigned from Final Inspection - Defect in: {defective_process.name}",
-                related_mo=batch.mo,
-                action_url=f'/supervisor/mo-detail/{batch.mo.id}'
+                related_mo=batch.mo
             )
             
             # Notify PH
@@ -910,12 +919,11 @@ class FinalInspectionReworkViewSet(viewsets.ModelViewSet):
             )
             for user in ph_users:
                 WorkflowNotification.objects.create(
-                    user=user,
+                    recipient=user,
                     notification_type='fi_rework_created',
                     title='FI Rework Created',
                     message=f"FI rework created for batch {batch.batch_id} - Process: {defective_process.name}",
-                    related_mo=batch.mo,
-                    action_url=f'/production-head/mo-detail/{batch.mo.id}'
+                    related_mo=batch.mo
                 )
         
         return Response(
@@ -943,12 +951,11 @@ class FinalInspectionReworkViewSet(viewsets.ModelViewSet):
             
             # Notify FI for re-inspection
             WorkflowNotification.objects.create(
-                user=fi_rework.inspected_by,
+                recipient=fi_rework.inspected_by,
                 notification_type='fi_rework_completed',
                 title='FI Rework Completed',
                 message=f"Rework for batch {fi_rework.batch.batch_id} completed - ready for re-inspection",
-                related_mo=fi_rework.mo,
-                action_url=f'/quality/final-inspection'
+                related_mo=fi_rework.mo
             )
             
             return Response(

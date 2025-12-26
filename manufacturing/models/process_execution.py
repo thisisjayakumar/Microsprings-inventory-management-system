@@ -255,7 +255,7 @@ class MOProcessExecution(models.Model):
         
         for recipient in recipients:
             WorkflowNotification.objects.create(
-                user=recipient,
+                recipient=recipient,
                 notification_type='supervisor_unavailable',
                 title='Action Needed: No Supervisor Available',
                 message=(
@@ -265,8 +265,7 @@ class MOProcessExecution(models.Model):
                     f'Please assign a supervisor manually.'
                 ),
                 priority='high',
-                related_mo=self.mo,
-                action_url=f'/production-head/mo-detail/{self.mo.id}'
+                related_mo=self.mo
             )
         
         logger.info(
