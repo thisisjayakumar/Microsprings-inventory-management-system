@@ -91,13 +91,13 @@ class Command(BaseCommand):
             # Create GRN with the provided GRN number
             grn = GRNReceipt.objects.create(
                 grn_number=grn_number,
-                purchase_order=system_po,
                 truck_number="SYS-IMPORT",
                 driver_name="System Import",
                 status="completed",
                 received_by=user,
                 quality_check_passed=True,
             )
+            grn.purchase_orders.add(system_po)
             
             if po_created:
                 self.stdout.write(f"Created system PO: {system_po.po_id}")

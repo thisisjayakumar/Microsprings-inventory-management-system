@@ -100,6 +100,12 @@ class Batch(models.Model):
         help_text="Whether this batch can be released for production. Set to False when MO is stopped."
     )
     
+    # Quality defect tracking
+    has_quality_defect = models.BooleanField(
+        default=False,
+        help_text="True if any coil in this batch was returned as quality defect. This batch will be excluded from RM calculations."
+    )
+    
     # Audit fields
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_batches')
@@ -143,25 +149,27 @@ class Batch(models.Model):
     
     @property
     def rm_released_kg(self):
-        """Calculate total RM released for this batch in kg"""
+        """Calculate total RM released for this batch in kg
+        Returns 0 if batch has quality defect (excluded from calculations)"""
+        if self.has_quality_defect:
+            return 0
         # planned_quantity is stored in grams, convert to kg
         return self.planned_quantity / 1000 if self.planned_quantity else 0
     
     @property
     def rm_used_kg(self):
         """Calculate actual RM used (Released - Returned)
-        Note: Quality defect returns are NOT included in returned RM calculation
-        They are quarantined and completely removed from available stock"""
-        released = self.rm_released_kg
+        Returns 0 if batch has quality defect (excluded from calculations)
+        Note: Quality defect batches are completely excluded from RM calculations"""
+        if self.has_quality_defect:
+            return 0
+        
+        released = self.planned_quantity / 1000 if self.planned_quantity else 0
         # Only count non-quality_defect returns
-        # Quality defect returns are tracked separately and don't affect used RM
         from manufacturing.models.rm_return import RMReturn
         non_quality_returns = RMReturn.objects.filter(
             batch=self
         ).exclude(return_reason='quality_defect')
         returned = sum(float(r.returned_kg) for r in non_quality_returns) if non_quality_returns.exists() else 0
-        # NOTE: Do NOT use batch.rm_returned_kg as fallback because it now includes quality_defect returns
-        # batch.rm_returned_kg is used for tracking total returned (including quarantined), but
-        # rm_used_kg should only subtract non-quality_defect returns
         return released - returned
 

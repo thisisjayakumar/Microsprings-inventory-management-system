@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 from datetime import timedelta
 from decouple import Config, RepositoryEnv
+from urllib.parse import urlparse
 import os
 from dotenv import load_dotenv
 import warnings
@@ -291,42 +292,98 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.CustomUser'
 
-# # Caching Configuration (for production use Redis)
-# CACHES = {
-#     'default': {
-#         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-#         'LOCATION': 'unique-snowflake',
-#         'TIMEOUT': 300,  # 5 minutes default
-#         'OPTIONS': {
-#             'MAX_ENTRIES': 1000,
-#         }
-#     }
-# }
+# Caching Configuration - Redis with environment-aware defaults
+# Detects Docker vs local environment and uses appropriate Redis URL
+def get_redis_url():
+    """Get Redis URL based on environment variables or auto-detect environment."""
+    # First, check if REDIS_URL is explicitly set
+    if 'REDIS_URL' in os.environ:
+        return os.environ.get('REDIS_URL')
+    
+    # Auto-detect environment: check if running in Docker
+    # Docker containers typically have /.dockerenv file or specific env vars
+    is_docker = (
+        os.path.exists('/.dockerenv') or 
+        os.environ.get('DOCKER_CONTAINER') == 'true' or
+        os.environ.get('COMPOSE_PROJECT_NAME')  # docker-compose sets this
+    )
+    
+    # Use 'redis' hostname for Docker, 'localhost' for local development
+    redis_host = 'redis' if is_docker else 'localhost'
+    redis_db = config('REDIS_DB', default='1', cast=str)
+    
+    return f'redis://{redis_host}:6379/{redis_db}'
 
-# Caching Configuration - Redis for shared cache across containers
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://redis:6379/1'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'SOCKET_CONNECT_TIMEOUT': 5,
-            'SOCKET_TIMEOUT': 5,
-            'CONNECTION_POOL_KWARGS': {
-                'max_connections': 50,
-                'retry_on_timeout': True,
+# Try to use Redis, fallback to local memory cache if unavailable
+REDIS_URL = get_redis_url()
+USE_REDIS = config('USE_REDIS', default=True, cast=bool)
+
+# Test Redis connection if enabled
+REDIS_AVAILABLE = False
+if USE_REDIS:
+    try:
+        import redis
+        parsed = urlparse(REDIS_URL)
+        r = redis.Redis(
+            host=parsed.hostname or 'localhost',
+            port=parsed.port or 6379,
+            db=int(parsed.path.lstrip('/')) if parsed.path else 1,
+            socket_connect_timeout=2,
+            socket_timeout=2
+        )
+        r.ping()
+        REDIS_AVAILABLE = True
+    except Exception:
+        REDIS_AVAILABLE = False
+        if DEBUG:
+            import warnings
+            warnings.warn(
+                f"Redis is not available at {REDIS_URL}. "
+                "Falling back to database-backed sessions. "
+                "Cache will use local memory.",
+                UserWarning
+            )
+
+if USE_REDIS and REDIS_AVAILABLE:
+    # Caching Configuration - Redis for shared cache
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': REDIS_URL,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'SOCKET_CONNECT_TIMEOUT': 5,
+                'SOCKET_TIMEOUT': 5,
+                'CONNECTION_POOL_KWARGS': {
+                    'max_connections': 50,
+                    'retry_on_timeout': True,
+                },
+                'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
+                'IGNORE_EXCEPTIONS': True,  # Fail gracefully if Redis is down
             },
-            'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
-            'IGNORE_EXCEPTIONS': True,  # Fail gracefully if Redis is down
-        },
-        'TIMEOUT': 300,  # 5 minutes default
-        'KEY_PREFIX': 'msp',  # Prefix all keys with 'msp:'
+            'TIMEOUT': 300,  # 5 minutes default
+            'KEY_PREFIX': 'msp',  # Prefix all keys with 'msp:'
+        }
     }
-}
-
-# Session storage in Redis (recommended for multi-container setup)
-SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
-SESSION_CACHE_ALIAS = 'default'
+    
+    # Session storage in Redis (recommended for multi-container setup)
+    SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+    SESSION_CACHE_ALIAS = 'default'
+else:
+    # Fallback: Use local memory cache and database-backed sessions
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'unique-snowflake',
+            'TIMEOUT': 300,  # 5 minutes default
+            'OPTIONS': {
+                'MAX_ENTRIES': 1000,
+            }
+        }
+    }
+    
+    # Session storage in database (works without Redis)
+    SESSION_ENGINE = 'django.contrib.sessions.backends.db'
 
 
 

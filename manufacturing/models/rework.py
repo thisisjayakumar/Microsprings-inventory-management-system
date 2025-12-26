@@ -253,23 +253,30 @@ class ReworkBatch(models.Model):
         self.started_at = timezone.now()
         self.save()
     
-    def complete_rework(self, ok_kg, scrap_kg):
-        """Complete rework and create completion record"""
+    def complete_rework(self, ok_kg, scrap_kg, rework_kg=Decimal('0')):
+        """Complete rework and create completion record
+        
+        Args:
+            ok_kg: OK quantity moving forward (kg)
+            scrap_kg: Scrap quantity (kg)
+            rework_kg: Rework quantity for next cycle (kg), defaults to 0
+        
+        Returns:
+            tuple: (completion, updated_rework_batch or None)
+            - If rework_kg > 0: returns (completion, self) - same batch stays in_progress with updated cycle
+            - If rework_kg = 0: returns (completion, None) - batch marked as completed
+        """
         if self.status != 'in_progress':
             raise ValidationError("Rework must be in progress to complete")
         
         # Validate quantities
-        total = Decimal(str(ok_kg)) + Decimal(str(scrap_kg))
+        total = Decimal(str(ok_kg)) + Decimal(str(scrap_kg)) + Decimal(str(rework_kg))
         tolerance = Decimal('0.01')
         
         if abs(total - self.rework_quantity_kg) > tolerance:
             raise ValidationError(
-                f"OK ({ok_kg}) + Scrap ({scrap_kg}) must equal Rework quantity ({self.rework_quantity_kg})"
+                f"OK ({ok_kg}) + Scrap ({scrap_kg}) + Rework ({rework_kg}) must equal Rework quantity ({self.rework_quantity_kg})"
             )
-        
-        self.status = 'completed'
-        self.completed_at = timezone.now()
-        self.save()
         
         # Create completion record
         completion = BatchProcessCompletion.objects.create(
@@ -279,14 +286,32 @@ class ReworkBatch(models.Model):
             input_quantity_kg=self.rework_quantity_kg,
             ok_quantity_kg=ok_kg,
             scrap_quantity_kg=scrap_kg,
-            rework_quantity_kg=0,  # No further rework
+            rework_quantity_kg=Decimal(str(rework_kg)),
             is_rework_cycle=True,
             rework_cycle_number=self.rework_cycle_number,
             parent_completion=self.completion_record,
             completion_notes=f"Rework cycle {self.rework_cycle_number} completed"
         )
         
-        return completion
+        # If rework quantity > 0, update same batch for next cycle (stay in_progress)
+        if Decimal(str(rework_kg)) > 0:
+            # Update the same rework batch: increment cycle, update quantity, keep in_progress
+            self.rework_cycle_number += 1
+            self.rework_quantity_kg = Decimal(str(rework_kg))
+            self.completion_record = completion  # Link to new completion record
+            self.status = 'in_progress'  # Keep in_progress for next cycle
+            self.started_at = timezone.now()  # Reset start time for new cycle
+            self.completed_at = None  # Clear completion time
+            self.save()
+            
+            return completion, self
+        
+        # If no rework quantity, mark as completed
+        self.status = 'completed'
+        self.completed_at = timezone.now()
+        self.save()
+        
+        return completion, None
 
 
 class FinalInspectionRework(models.Model):

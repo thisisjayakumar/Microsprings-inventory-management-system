@@ -206,73 +206,43 @@ def _reassign_supervisor_work(supervisor_user):
             old_supervisor = execution.assigned_supervisor.get_full_name() if execution.assigned_supervisor else 'None'
             
             if backup_supervisor:
-                # Check if backup supervisor is currently logged in
-                is_backup_logged_in = LoginSession.objects.filter(
-                    user=backup_supervisor,
-                    is_active=True,
-                    logout_time__isnull=True
-                ).exists()
+                # FORCE ASSIGNMENT: Assign to backup supervisor even if not logged in
+                # Policy change as per user request: Backup supervisor should receive the task 
+                # and see it upon their next login.
                 
-                if is_backup_logged_in:
-                    execution.assigned_supervisor = backup_supervisor
-                    execution.save(update_fields=['assigned_supervisor', 'updated_at'])
-                    
-                    new_supervisor = backup_supervisor.get_full_name()
-                    logger.info(
-                        f"Reassigned {execution.mo.mo_id} - {execution.process.name}: "
-                        f"{old_supervisor} → {new_supervisor}"
-                    )
-                    
-                    reassignment_summary.append({
-                        'mo_id': execution.mo.mo_id,
-                        'process': execution.process.name,
-                        'old_supervisor': old_supervisor,
-                        'new_supervisor': new_supervisor,
-                        'status': 'reassigned_to_backup'
-                    })
-                    
-                    # Log the change
-                    _log_supervisor_change(
-                        execution,
-                        supervisor_user,
-                        backup_supervisor,
-                        'attendance_absence',
-                        f"Automatic reassignment due to {old_supervisor} logout",
-                        shift=current_shift
-                    )
-                    
-                    # Send notification to backup supervisor
-                    _notify_supervisor_reassignment(
-                        execution,
-                        backup_supervisor,
-                        old_supervisor
-                    )
-                else:
-                    # Backup supervisor is also logged out, set to None
-                    backup_supervisor_name = backup_supervisor.get_full_name()
-                    execution.assigned_supervisor = None
-                    execution.save(update_fields=['assigned_supervisor', 'updated_at'])
-                    
-                    logger.warning(
-                        f"Backup supervisor {backup_supervisor_name} is not logged in. "
-                        f"Setting {execution.mo.mo_id} - {execution.process.name} supervisor to None"
-                    )
-                    
-                    reassignment_summary.append({
-                        'mo_id': execution.mo.mo_id,
-                        'process': execution.process.name,
-                        'old_supervisor': old_supervisor,
-                        'new_supervisor': 'None',
-                        'backup_supervisor_name': backup_supervisor_name,
-                        'status': 'unassigned_backup_unavailable'
-                    })
-                    
-                    # Note: Not logging to SupervisorChangeLog when setting to None
-                    # SupervisorChangeLog requires to_supervisor (cannot be null)
-                    # The unassignment is tracked via process execution status and notifications
-                    
-                    # Send notification to production head
-                    _notify_production_head_unassigned_process(execution, supervisor_user)
+                execution.assigned_supervisor = backup_supervisor
+                execution.save(update_fields=['assigned_supervisor', 'updated_at'])
+                
+                new_supervisor = backup_supervisor.get_full_name()
+                logger.info(
+                    f"Reassigned {execution.mo.mo_id} - {execution.process.name}: "
+                    f"{old_supervisor} → {new_supervisor}"
+                )
+                
+                reassignment_summary.append({
+                    'mo_id': execution.mo.mo_id,
+                    'process': execution.process.name,
+                    'old_supervisor': old_supervisor,
+                    'new_supervisor': new_supervisor,
+                    'status': 'reassigned_to_backup'
+                })
+                
+                # Log the change
+                _log_supervisor_change(
+                    execution,
+                    supervisor_user,
+                    backup_supervisor,
+                    'attendance_absence',
+                    f"Automatic reassignment due to {old_supervisor} logout",
+                    shift=current_shift
+                )
+                
+                # Send notification to backup supervisor
+                _notify_supervisor_reassignment(
+                    execution,
+                    backup_supervisor,
+                    old_supervisor
+                )
             else:
                 # No backup supervisor configured, set to None
                 execution.assigned_supervisor = None
