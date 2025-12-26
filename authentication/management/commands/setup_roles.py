@@ -127,6 +127,18 @@ class Command(BaseCommand):
                     'inventory_transactions': ['create', 'read']
                 },
                 'restricted_departments': []  # Outsourcing incharge can manage all departments
+            },
+            {
+                'name': 'packing_zone',
+                'description': 'Packing Zone role with access to packing operations, labels, and box management',
+                'hierarchy_level': 8,
+                'permissions': {
+                    'packing_zone': ['create', 'read', 'update'],
+                    'labels': ['read', 'print'],
+                    'box_management': ['create', 'read', 'update'],
+                    'packing_history': ['read']
+                },
+                'restricted_departments': ['packing']
             }
         ]
         

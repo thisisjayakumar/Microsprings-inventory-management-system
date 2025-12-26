@@ -132,6 +132,14 @@ class Command(BaseCommand):
                     ('Sophia', 'Lee', 'sophia.outsource@microsprings.com', 'OSI002'),
                 ]
             },
+            {
+                'role': 'packing_zone',
+                'department': 'packing',
+                'users': [
+                    ('Alice', 'Packing', 'alice.packing@microsprings.com', 'PZ001'),
+                    ('Bob', 'Packing', 'bob.packing@microsprings.com', 'PZ002'),
+                ]
+            },
         ]
         
         shifts = ['I', 'II', 'III']
@@ -143,7 +151,8 @@ class Command(BaseCommand):
             'rm_store': 'Raw Material Store Keeper',
             'fg_store': 'Finished Goods Store Keeper / Operator',
             'patrol': 'Quality Control Patrol',
-            'outsourcing_incharge': 'Outsourcing Incharge'
+            'outsourcing_incharge': 'Outsourcing Incharge',
+            'packing_zone': 'Packing Zone Incharge'
         }
         
         created_count = 0
