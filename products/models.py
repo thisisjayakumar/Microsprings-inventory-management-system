@@ -104,6 +104,11 @@ class Product(models.Model):
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_products')
     updated_at = models.DateTimeField(auto_now=True)
     internal_product_code = models.CharField(max_length=120, null=True, blank=True, db_index=True)
+    packing_size = models.PositiveIntegerField(
+        null=True, 
+        blank=True, 
+        help_text="Number of units per standard packing box/unit"
+    )
 
     class Meta:
         verbose_name = 'Product'

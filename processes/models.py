@@ -164,6 +164,12 @@ class BOM(models.Model):
         help_text="Total pieces per sheet"
     )
     
+    packing_size = models.PositiveIntegerField(
+        null=True, 
+        blank=True, 
+        help_text="Number of units per standard packing box/unit"
+    )
+    
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

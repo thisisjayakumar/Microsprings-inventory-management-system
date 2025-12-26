@@ -87,6 +87,7 @@ class Command(BaseCommand):
                         material_code = row.get("Material_Code", "").strip()
                         cust_id = row.get("Cust_ID", "").strip()
                         grams_per_product = row.get("gram/product", "").strip()
+                        packing_size = row.get("Packing_Size", "").strip()
                         
                         # Extract sheet dimensions (first occurrence)
                         sheet_length = row.get("Length (L)", "").strip()
@@ -198,6 +199,7 @@ class Command(BaseCommand):
                                     # Strip and piece counts
                                     'strips_per_sheet': self.safe_int(strip_count, row_num, 'strips_per_sheet'),
                                     'pcs_per_strip': self.safe_int(pcs_per_strip, row_num, 'pcs_per_strip'),
+                                    'packing_size': self.safe_int(packing_size, row_num, 'packing_size'),
                                 }
                             )
                             
@@ -216,6 +218,7 @@ class Command(BaseCommand):
                             strip_count_int = self.safe_int(strip_count, row_num, "Strip Count")
                             pcs_per_strip_int = self.safe_int(pcs_per_strip, row_num, "Pcs per Strip")
                             pcs_per_sheet_int = self.safe_int(pcs_per_sheet, row_num, "Pcs per Sheet")
+                            packing_size_int = self.safe_int(packing_size, row_num, "Packing Size")
 
                             # Process the manufacturing steps
                             process_columns = [
@@ -306,8 +309,8 @@ class Command(BaseCommand):
                                 bom, bom_created = BOM.objects.update_or_create(
                                     product_code=product_code,
                                     process_step=step,
-                                    material=material,
                                     defaults={
+                                        "material": material,
                                         "type": "stamp",
                                         "sheet_length": sheet_length_decimal,
                                         "sheet_breadth": sheet_breadth_decimal,
@@ -316,6 +319,7 @@ class Command(BaseCommand):
                                         "strip_count": strip_count_int,
                                         "pcs_per_strip": pcs_per_strip_int,
                                         "pcs_per_sheet": pcs_per_sheet_int,
+                                        "packing_size": packing_size_int,
                                         "is_active": True,
                                     }
                                 )

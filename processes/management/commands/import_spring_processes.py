@@ -26,6 +26,7 @@ class Command(BaseCommand):
         created_products = 0
         updated_products = 0
         created_boms = 0
+        updated_boms = 0
         skipped_rows = 0
 
         with open(csv_file, newline="", encoding="utf-8") as f:
@@ -48,6 +49,7 @@ class Command(BaseCommand):
                         material_code = row.get("Material_Code", "").strip()
                         cust_id = row.get("Cust_ID", "").strip()
                         grams_per_product = row.get("gram/product", "").strip()
+                        packing_size = row.get("Packing_Size", "").strip()
                         
                         # Map product type
                         mapped_product_type = "spring" if product_type.lower() == "spring" else "spring"
@@ -110,6 +112,19 @@ class Command(BaseCommand):
                                         )
                                     )
                             
+                            # Parse packing_size
+                            packing_size_value = None
+                            if packing_size:
+                                try:
+                                    packing_size_value = int(float(packing_size))
+                                except (ValueError, TypeError):
+                                    self.stdout.write(
+                                        self.style.WARNING(
+                                            f"Row {row_num}: Invalid packing_size value '{packing_size}'. "
+                                            f"Setting to None."
+                                        )
+                                    )
+                            
                             # Create or update product
                             product, product_created = Product.objects.update_or_create(
                                 product_code=product_code,
@@ -120,6 +135,7 @@ class Command(BaseCommand):
                                     "customer_c_id": customer,
                                     "internal_product_code": row.get("IPC_Code", "").strip() or None,
                                     "grams_per_product": grams_value,
+                                    "packing_size": packing_size_value,
                                 }
                             )
                             
@@ -179,12 +195,17 @@ class Command(BaseCommand):
                                     defaults={
                                         "type": "spring",
                                         "material": material,
+                                        "packing_size": packing_size_value,
                                         "is_active": True,
                                     }
                                 )
                                 
                                 if bom_created:
                                     created_boms += 1
+                                    self.stdout.write(f"    Created BOM for {product_code} at {process_col}")
+                                else:
+                                    updated_boms += 1
+                                    self.stdout.write(f"    Updated BOM for {product_code} at {process_col}")
                                 
                                 self.stdout.write(
                                     f"    {'Created' if step_created else 'Updated'} process step: "
@@ -210,6 +231,7 @@ class Command(BaseCommand):
                     f"Products created: {created_products}\n"
                     f"Products updated: {updated_products}\n"
                     f"BOM entries created: {created_boms}\n"
+                    f"BOM entries updated: {updated_boms}\n"
                     f"Rows skipped: {skipped_rows}"
                 )
             )
