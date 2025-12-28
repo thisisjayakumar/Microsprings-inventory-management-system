@@ -1129,6 +1129,85 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
         reserved_count = final_check.filter(status='reserved').count()
         reserved_total_kg = sum(float(a.allocated_quantity_kg) for a in final_check.filter(status='reserved'))
         
+        # IMPORTANT: Initialize process executions automatically when starting production
+        # This ensures process tracking is set up immediately
+        process_init_success = False
+        process_init_error = None
+        try:
+            # Check if processes already initialized
+            existing_executions = MOProcessExecution.objects.filter(mo=mo)
+            if not existing_executions.exists():
+                logger.info(f"[PROCESS_INIT] MO {mo.mo_id} - Initializing process executions...")
+                
+                # Get processes from BOM for this product
+                from processes.models import BOM
+                bom_items = BOM.objects.filter(
+                    product_code=mo.product_code.product_code,
+                    is_active=True
+                ).select_related('process_step__process', 'process_step__subprocess')
+                
+                if bom_items.exists():
+                    # Filter out fully outsourced processes
+                    process_step_counts = {}
+                    process_outsourced_counts = {}
+                    
+                    for bom_item in bom_items:
+                        process_id = bom_item.process_step.process.id
+                        if process_id not in process_step_counts:
+                            process_step_counts[process_id] = 0
+                            process_outsourced_counts[process_id] = 0
+                        process_step_counts[process_id] += 1
+                        if bom_item.is_outsourced:
+                            process_outsourced_counts[process_id] += 1
+                    
+                    # Only include processes where at least one step is NOT outsourced
+                    non_outsourced_process_ids = [
+                        pid for pid in process_step_counts.keys()
+                        if process_outsourced_counts[pid] < process_step_counts[pid]
+                    ]
+                    
+                    if non_outsourced_process_ids:
+                        # Get unique processes
+                        unique_processes = {}
+                        for bom_item in bom_items:
+                            process = bom_item.process_step.process
+                            if process.id in non_outsourced_process_ids and process.id not in unique_processes:
+                                unique_processes[process.id] = process
+                        
+                        # Create process executions
+                        sequence = 1
+                        created_executions = []
+                        for process in unique_processes.values():
+                            execution, created = MOProcessExecution.objects.get_or_create(
+                                mo=mo,
+                                process=process,
+                                defaults={
+                                    'sequence_order': sequence,
+                                    'status': 'pending'
+                                }
+                            )
+                            if created:
+                                sequence += 1
+                                created_executions.append(execution)
+                                logger.info(f"[PROCESS_INIT] Created process execution for {process.name}")
+                        
+                        process_init_success = True
+                        logger.info(f"[PROCESS_INIT] MO {mo.mo_id} - Successfully created {len(created_executions)} process executions")
+                    else:
+                        process_init_error = "No internal processes found (all processes are outsourced)"
+                        logger.warning(f"[PROCESS_INIT] MO {mo.mo_id} - {process_init_error}")
+                else:
+                    process_init_error = "No processes found in BOM for this product"
+                    logger.warning(f"[PROCESS_INIT] MO {mo.mo_id} - {process_init_error}")
+            else:
+                process_init_success = True
+                logger.info(f"[PROCESS_INIT] MO {mo.mo_id} - Processes already initialized ({existing_executions.count()} executions)")
+        except Exception as init_error:
+            process_init_error = str(init_error)
+            logger.error(f"[PROCESS_INIT] MO {mo.mo_id} - Failed to initialize processes: {init_error}")
+            logger.exception(init_error)
+            # Don't fail the entire operation, just log the error
+        
         serializer = ManufacturingOrderWithProcessesSerializer(mo)
         response_data = {
             'message': 'Production started successfully! RM is reserved.',
@@ -1138,6 +1217,10 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 'reserved_kg': reserved_total_kg,
                 'required_kg': float(mo.rm_required_kg) if mo.rm_required_kg else 0,
                 'is_fully_reserved': reserved_total_kg >= (float(mo.rm_required_kg) if mo.rm_required_kg else 0)
+            },
+            'process_initialization': {
+                'success': process_init_success,
+                'error': process_init_error
             }
         }
         
