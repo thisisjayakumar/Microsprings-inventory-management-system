@@ -537,12 +537,26 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(completions, many=True)
         return Response(serializer.data)
     
-    def _move_to_next_process(self, batch, current_process_execution, ok_quantity_kg):
-        """Move OK quantity to next process"""
+    def _move_to_next_process(self, batch, current_process_execution, ok_quantity_kg, is_rework=False, rework_cycle=0, completion_record=None):
+        """Move OK quantity to next process
+        
+        Args:
+            batch: Batch object
+            current_process_execution: Current process execution
+            ok_quantity_kg: OK quantity to move forward
+            is_rework: True if this is from a rework completion
+            rework_cycle: Rework cycle number (0 = original, 1 = R1, etc.)
+            completion_record: BatchProcessCompletion record that generated this OK quantity
+        """
         next_process = current_process_execution.get_next_process_execution()
         
         if next_process:
-            # Create receipt log for handover
+            # Create receipt log for handover with rework tracking
+            rework_indicator = f"-R{rework_cycle}" if is_rework and rework_cycle > 0 else ""
+            handover_notes = f"OK quantity from {current_process_execution.process.name}"
+            if is_rework:
+                handover_notes += f" (Rework Cycle {rework_cycle})"
+            
             BatchReceiptLog.objects.create(
                 batch=batch,
                 mo=batch.mo,
@@ -551,16 +565,20 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                 handed_over_by=current_process_execution.assigned_supervisor,
                 handed_over_at=timezone.now(),
                 handed_over_quantity_kg=ok_quantity_kg,
-                handover_notes=f"OK quantity from {current_process_execution.process.name}"
+                handover_notes=handover_notes,
+                is_rework_batch=is_rework,
+                rework_cycle_number=rework_cycle,
+                parent_completion=completion_record
             )
             
-            # Notify next supervisor
+            # Notify next supervisor with rework indicator
             if next_process.assigned_supervisor:
+                batch_display_id = f"{batch.batch_id}{rework_indicator}"
                 WorkflowNotification.objects.create(
                     recipient=next_process.assigned_supervisor,
                     notification_type='batch_received',
                     title='Batch Received',
-                    message=f"Batch {batch.batch_id} received from {current_process_execution.process.name} - {ok_quantity_kg} kg",
+                    message=f"Batch {batch_display_id} received from {current_process_execution.process.name} - {ok_quantity_kg} kg",
                     related_mo=batch.mo
                 )
 
@@ -639,17 +657,19 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                     rework_kg=Decimal(str(rework_kg))
                 )
                 
-                # Move OK to next process
+                # Move OK to next process with rework indicator
                 if ok_kg > 0:
-                    next_process = rework_batch.process_execution.get_next_process_execution()
-                    if next_process and next_process.assigned_supervisor:
-                        WorkflowNotification.objects.create(
-                            recipient=next_process.assigned_supervisor,
-                            notification_type='rework_completed',
-                            title='Rework Completed',
-                            message=f"Rework batch {rework_batch.original_batch.batch_id} completed - {ok_kg} kg OK",
-                            related_mo=rework_batch.original_batch.mo
-                        )
+                    # Use the BatchProcessCompletionViewSet's _move_to_next_process method
+                    # Create an instance to access the method
+                    completion_viewset = BatchProcessCompletionViewSet()
+                    completion_viewset._move_to_next_process(
+                        batch=rework_batch.original_batch,
+                        current_process_execution=rework_batch.process_execution,
+                        ok_quantity_kg=ok_kg,
+                        is_rework=True,
+                        rework_cycle=rework_batch.rework_cycle_number,
+                        completion_record=completion
+                    )
                 
                 # Build response data
                 # If updated_rework_batch exists, it's the same batch updated for next cycle (stays in_progress)
@@ -674,6 +694,60 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+
+class BatchReceiptLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for batch receipt logs (read-only)
+    Shows batch handovers between processes with rework tracking
+    """
+    queryset = BatchReceiptLog.objects.all()
+    serializer_class = BatchReceiptLogSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filter by process
+        process_id = self.request.query_params.get('process_id')
+        if process_id:
+            queryset = queryset.filter(to_process_id=process_id)
+        
+        # Filter by MO
+        mo_id = self.request.query_params.get('mo_id')
+        if mo_id:
+            queryset = queryset.filter(mo_id=mo_id)
+        
+        # Filter by batch
+        batch_id = self.request.query_params.get('batch_id')
+        if batch_id:
+            queryset = queryset.filter(batch_id=batch_id)
+        
+        return queryset.select_related(
+            'batch', 'mo', 'from_process', 'to_process',
+            'handed_over_by', 'received_by', 'parent_completion'
+        ).order_by('-handed_over_at')
+    
+    @action(detail=False, methods=['get'])
+    def for_supervisor_process(self, request):
+        """Get receipt logs for supervisor's assigned process"""
+        process_id = request.query_params.get('process_id')
+        
+        if not process_id:
+            return Response(
+                {'error': 'process_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get receipt logs for this process, grouped by batch and rework cycle
+        logs = BatchReceiptLog.objects.filter(
+            to_process_id=process_id
+        ).select_related(
+            'batch', 'mo', 'from_process', 'handed_over_by', 'parent_completion'
+        ).order_by('batch__batch_id', 'rework_cycle_number', '-handed_over_at')
+        
+        serializer = self.get_serializer(logs, many=True)
+        return Response(serializer.data)
 
 
 class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):

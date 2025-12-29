@@ -292,6 +292,24 @@ class BatchReceiptLog(models.Model):
         related_name='receipt_logs'
     )
     
+    # Rework tracking for separate batch flow
+    is_rework_batch = models.BooleanField(
+        default=False,
+        help_text="True if this is OK quantity from a rework completion"
+    )
+    rework_cycle_number = models.PositiveIntegerField(
+        default=0,
+        help_text="Rework cycle (0 = original, 1 = R1, 2 = R2, etc.)"
+    )
+    parent_completion = models.ForeignKey(
+        'manufacturing.BatchProcessCompletion',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='child_receipt_logs',
+        help_text="Completion record that generated this rework OK quantity"
+    )
+    
     # Status
     is_verified = models.BooleanField(default=False)
     has_issues = models.BooleanField(default=False)
@@ -317,11 +335,20 @@ class BatchReceiptLog(models.Model):
             models.Index(fields=['batch', '-created_at']),
             models.Index(fields=['from_process', 'to_process']),
             models.Index(fields=['is_verified', 'has_issues']),
+            models.Index(fields=['is_rework_batch', 'rework_cycle_number']),
         ]
     
     def __str__(self):
         from_text = self.from_process.name if self.from_process else "RM Store"
-        return f"{self.batch.batch_id}: {from_text} → {self.to_process.name}"
+        rework_indicator = f"-R{self.rework_cycle_number}" if self.is_rework_batch and self.rework_cycle_number > 0 else ""
+        return f"{self.batch.batch_id}{rework_indicator}: {from_text} → {self.to_process.name}"
+    
+    @property
+    def batch_display_id(self):
+        """Get batch ID with rework indicator for display"""
+        if self.is_rework_batch and self.rework_cycle_number > 0:
+            return f"{self.batch.batch_id}-R{self.rework_cycle_number}"
+        return self.batch.batch_id
     
     def confirm_receipt(self, verification_record):
         """Link verification record and update receipt info"""

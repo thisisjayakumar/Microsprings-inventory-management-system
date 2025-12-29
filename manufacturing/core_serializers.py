@@ -508,7 +508,7 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
         
         # Automatically create MO workflow and send notifications to managers
         try:
-            from manufacturing.workflow_service import ManufacturingWorkflowService
+            from manufacturing.services.workflow import ManufacturingWorkflowService
             workflow = ManufacturingWorkflowService.create_mo_workflow(mo.id, self.context['request'].user)
             logger.info(f"MO workflow created for MO {mo.mo_id}")
         except Exception as e:

@@ -313,20 +313,35 @@ class BatchReceiptReportSerializer(serializers.Serializer):
 class BatchReceiptLogSerializer(serializers.ModelSerializer):
     """Serializer for batch receipt logs"""
     batch_id = serializers.CharField(source='batch.batch_id', read_only=True)
+    batch_display_id = serializers.SerializerMethodField()
     from_process_name = serializers.CharField(source='from_process.name', read_only=True, allow_null=True)
     to_process_name = serializers.CharField(source='to_process.name', read_only=True)
     handed_over_by_name = serializers.CharField(source='handed_over_by.get_full_name', read_only=True, allow_null=True)
     received_by_name = serializers.CharField(source='received_by.get_full_name', read_only=True, allow_null=True)
+    rework_indicator = serializers.SerializerMethodField()
+    
+    def get_batch_display_id(self, obj):
+        """Get batch ID with rework indicator"""
+        if obj.is_rework_batch and obj.rework_cycle_number > 0:
+            return f"{obj.batch.batch_id}-R{obj.rework_cycle_number}"
+        return obj.batch.batch_id
+    
+    def get_rework_indicator(self, obj):
+        """Get rework indicator for display (R, R2, R3, etc.)"""
+        if obj.is_rework_batch and obj.rework_cycle_number > 0:
+            return f"R{obj.rework_cycle_number}"
+        return None
     
     class Meta:
         model = BatchReceiptLog
         fields = [
-            'id', 'batch', 'batch_id', 'mo', 'from_process', 'from_process_name',
+            'id', 'batch', 'batch_id', 'batch_display_id', 'mo', 'from_process', 'from_process_name',
             'to_process', 'to_process_name', 'handed_over_by', 'handed_over_by_name',
             'handed_over_at', 'received_by', 'received_by_name', 'received_at',
             'handed_over_quantity_kg', 'received_quantity_kg', 'verification_record',
             'is_verified', 'has_issues', 'transit_duration_minutes',
-            'handover_notes', 'receipt_notes', 'created_at', 'updated_at'
+            'handover_notes', 'receipt_notes', 'created_at', 'updated_at',
+            'is_rework_batch', 'rework_cycle_number', 'rework_indicator'
         ]
         read_only_fields = [
             'id', 'is_verified', 'has_issues', 'transit_duration_minutes',

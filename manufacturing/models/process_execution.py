@@ -184,6 +184,51 @@ class MOProcessExecution(models.Model):
                             f'No daily status found for {self.process.name} - {current_shift}. '
                             f'Using default primary supervisor. Run check_supervisor_attendance command.'
                         )
+                    else:
+                        # Step 2.5: Fallback to ProcessSupervisor based on process name
+                        # This ensures supervisors are assigned even if DailySupervisorStatus/WorkCenterSupervisorShift aren't configured
+                        from authentication.models import ProcessSupervisor
+                        
+                        process_name = self.process.name
+                        department = self._get_process_department(process_name)
+                        
+                        if department:
+                            # Find ProcessSupervisor for this department where process name matches
+                            process_supervisor = ProcessSupervisor.objects.filter(
+                                department=department,
+                                is_active=True
+                            ).first()
+                            
+                            if process_supervisor:
+                                # Check if this process name is in the supervisor's process_names list
+                                process_names_list = process_supervisor.process_names if isinstance(process_supervisor.process_names, list) else []
+                                
+                                # If process_names is empty, assign any supervisor for this department
+                                # If process_names has values, check if process name matches (flexible matching)
+                                should_assign = False
+                                
+                                if not process_names_list:
+                                    # Empty list means supervisor handles all processes in this department
+                                    should_assign = True
+                                else:
+                                    # Check for exact match or partial match (case-insensitive)
+                                    process_name_lower = process_name.lower()
+                                    for allowed_name in process_names_list:
+                                        allowed_name_lower = str(allowed_name).lower()
+                                        # Exact match or if process name contains allowed name or vice versa
+                                        if (process_name_lower == allowed_name_lower or 
+                                            process_name_lower in allowed_name_lower or 
+                                            allowed_name_lower in process_name_lower):
+                                            should_assign = True
+                                            break
+                                
+                                if should_assign:
+                                    assigned_supervisor = process_supervisor.supervisor
+                                    assignment_reason = 'process_supervisor_fallback'
+                                    logger.info(
+                                        f'Using ProcessSupervisor fallback for {self.process.name} - '
+                                        f'Assigned {assigned_supervisor.get_full_name()} from department {department}'
+                                    )
             
             # Step 3: Assign or leave unassigned
             if assigned_supervisor:
@@ -431,19 +476,39 @@ class MOProcessExecution(models.Model):
     
     def _get_process_department(self, process_name):
         """Map process name to department"""
+        if not process_name:
+            return None
+            
+        process_name_lower = process_name.lower()
+        
+        # Check for department keywords in process name (case-insensitive)
+        if 'coiling' in process_name_lower:
+            return 'coiling'
+        elif 'tempering' in process_name_lower:
+            return 'tempering'
+        elif 'plating' in process_name_lower:
+            return 'plating'
+        elif 'packing' in process_name_lower or 'label' in process_name_lower:
+            return 'packing'
+        
+        # Fallback to exact match mapping
         process_department_mapping = {
             'Coiling Setup': 'coiling',
             'Coiling Operation': 'coiling', 
             'Coiling QC': 'coiling',
+            'Coiling': 'coiling',
             'Tempering Setup': 'tempering',
             'Tempering Process': 'tempering',
             'Tempering QC': 'tempering',
+            'Tempering': 'tempering',
             'Plating Preparation': 'plating',
             'Plating Process': 'plating',
             'Plating QC': 'plating',
+            'Plating': 'plating',
             'Packing Setup': 'packing',
             'Packing Process': 'packing',
-            'Label Printing': 'packing'
+            'Label Printing': 'packing',
+            'Packing': 'packing'
         }
         return process_department_mapping.get(process_name)
     

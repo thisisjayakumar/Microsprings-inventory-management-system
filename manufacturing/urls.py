@@ -18,6 +18,7 @@ from .views.supervisor_views import (
     ProcessDowntimeAnalyticsViewSet,
     BatchProcessCompletionViewSet,
     ReworkBatchViewSet,
+    BatchReceiptLogViewSet,
     BatchReceiptVerificationViewSet,
     FinalInspectionReworkViewSet,
     ProcessActivityLogViewSet,
@@ -52,6 +53,7 @@ router.register(r'process-stops', ProcessStopViewSet, basename='process-stop')
 router.register(r'downtime-analytics', ProcessDowntimeAnalyticsViewSet, basename='downtime-analytics')
 router.register(r'batch-completions', BatchProcessCompletionViewSet, basename='batch-completion')
 router.register(r'rework-batches', ReworkBatchViewSet, basename='rework-batch')
+router.register(r'batch-receipt-logs', BatchReceiptLogViewSet, basename='batch-receipt-log')
 router.register(r'batch-receipts', BatchReceiptVerificationViewSet, basename='batch-receipt')
 router.register(r'fi-reworks', FinalInspectionReworkViewSet, basename='fi-rework')
 router.register(r'activity-logs', ProcessActivityLogViewSet, basename='activity-log')
