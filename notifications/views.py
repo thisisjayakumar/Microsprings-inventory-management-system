@@ -38,6 +38,15 @@ class WorkflowNotificationViewSet(viewsets.ReadOnlyModelViewSet):
         
         return Response({'message': 'marked as read'}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['post'])
+    def mark_all_read(self, request):
+        """Mark all notifications for current user as read"""
+        notifications = self.get_queryset().filter(is_read=False)
+        count = notifications.count()
+        notifications.update(is_read=True, read_at=timezone.now())
+        
+        return Response({'message': f'Marked {count} notifications as read'}, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['post'])
     def mark_action_taken(self, request, pk=None):
         """Mark that action has been taken on notification"""

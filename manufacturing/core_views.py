@@ -1191,8 +1191,38 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                                 created_executions.append(execution)
                                 logger.info(f"[PROCESS_INIT] Created process execution for {process.name}")
                         
+                        # Auto-assign supervisors to newly created process executions
+                        from notifications.models import WorkflowNotification
+                        for execution in created_executions:
+                            try:
+                                execution.auto_assign_supervisor()
+                                logger.info(
+                                    f"Auto-assigned supervisor for {mo.mo_id} - {execution.process.name}: "
+                                    f"{execution.assigned_supervisor.get_full_name() if execution.assigned_supervisor else 'None'}"
+                                )
+                                
+                                # Send notification to the assigned supervisor
+                                if execution.assigned_supervisor:
+                                    WorkflowNotification.objects.create(
+                                        notification_type='supervisor_assigned',
+                                        title=f'Process Assigned: {execution.process.name}',
+                                        message=f'You have been automatically assigned as supervisor for process "{execution.process.name}" for MO {mo.mo_id}.',
+                                        recipient=execution.assigned_supervisor,
+                                        related_mo=mo,
+                                        action_required=True,
+                                        created_by=request.user
+                                    )
+                                    logger.info(
+                                        f"Sent notification to {execution.assigned_supervisor.get_full_name()} "
+                                        f"for {mo.mo_id} - {execution.process.name}"
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error auto-assigning supervisor for {mo.mo_id} - {execution.process.name}: {str(e)}"
+                                )
+                        
                         process_init_success = True
-                        logger.info(f"[PROCESS_INIT] MO {mo.mo_id} - Successfully created {len(created_executions)} process executions")
+                        logger.info(f"[PROCESS_INIT] MO {mo.mo_id} - Successfully created and assigned {len(created_executions)} process executions")
                     else:
                         process_init_error = "No internal processes found (all processes are outsourced)"
                         logger.warning(f"[PROCESS_INIT] MO {mo.mo_id} - {process_init_error}")
