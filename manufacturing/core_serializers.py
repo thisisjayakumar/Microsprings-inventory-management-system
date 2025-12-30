@@ -208,10 +208,11 @@ class BatchMinimalSerializer(serializers.ModelSerializer):
 class ProductMinimalSerializer(serializers.ModelSerializer):
     """Minimal product serializer for MO list - only essential fields for frontend display"""
     customer_name = serializers.CharField(source='customer_c_id.name', read_only=True)
+    material_code = serializers.CharField(source='material.material_code', read_only=True)
     
     class Meta:
         model = Product
-        fields = ['id', 'product_code', 'customer_name', 'material_type']
+        fields = ['id', 'product_code', 'customer_name', 'material_type', 'material_code']
         read_only_fields = fields
 
 

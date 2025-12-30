@@ -483,7 +483,14 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             
             # Move OK quantity to next process
             if completion.ok_quantity_kg > 0:
-                self._move_to_next_process(batch, process_execution, completion.ok_quantity_kg)
+                self._move_to_next_process(
+                    batch=batch,
+                    current_process_execution=process_execution,
+                    ok_quantity_kg=completion.ok_quantity_kg,
+                    is_rework=False,
+                    rework_cycle=0,
+                    completion_record=completion
+                )
             
             # Add scrap to count (update batch scrap quantity)
             if completion.scrap_quantity_kg > 0:
@@ -548,6 +555,9 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             rework_cycle: Rework cycle number (0 = original, 1 = R1, etc.)
             completion_record: BatchProcessCompletion record that generated this OK quantity
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         next_process = current_process_execution.get_next_process_execution()
         
         if next_process:
@@ -557,7 +567,9 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             if is_rework:
                 handover_notes += f" (Rework Cycle {rework_cycle})"
             
-            BatchReceiptLog.objects.create(
+            logger.info(f"📦 Creating BatchReceiptLog: {batch.batch_id}{rework_indicator} - {ok_quantity_kg} kg from {current_process_execution.process.name} → {next_process.process.name}")
+            
+            receipt_log = BatchReceiptLog.objects.create(
                 batch=batch,
                 mo=batch.mo,
                 from_process=current_process_execution.process,
@@ -571,6 +583,8 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                 parent_completion=completion_record
             )
             
+            logger.info(f"✅ BatchReceiptLog created: ID={receipt_log.id}, quantity={receipt_log.handed_over_quantity_kg} kg, is_rework={receipt_log.is_rework_batch}, cycle={receipt_log.rework_cycle_number}")
+            
             # Notify next supervisor with rework indicator
             if next_process.assigned_supervisor:
                 batch_display_id = f"{batch.batch_id}{rework_indicator}"
@@ -581,6 +595,8 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                     message=f"Batch {batch_display_id} received from {current_process_execution.process.name} - {ok_quantity_kg} kg",
                     related_mo=batch.mo
                 )
+        else:
+            logger.info(f"ℹ️  No next process found for {current_process_execution.process.name} - batch {batch.batch_id} completed all processes")
 
 
 class ReworkBatchViewSet(viewsets.ModelViewSet):
