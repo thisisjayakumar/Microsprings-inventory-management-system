@@ -180,6 +180,46 @@ class BatchProcessCompletionSerializer(serializers.ModelSerializer):
     rework_percentage = serializers.FloatField(read_only=True)
     rework_badge = serializers.CharField(read_only=True)
     
+    # Add verification data fields
+    expected_received_kg = serializers.SerializerMethodField()
+    actual_received_kg = serializers.SerializerMethodField()
+    
+    def get_expected_received_kg(self, obj):
+        """Get expected received quantity from verification record"""
+        try:
+            from manufacturing.models.batch_verification import BatchReceiptVerification
+            
+            verification = BatchReceiptVerification.objects.filter(
+                batch=obj.batch,
+                process_execution=obj.process_execution
+            ).order_by('-received_at').first()
+            
+            if verification:
+                return float(verification.expected_quantity_kg)
+            
+            # Fallback: use input_quantity_kg if no verification found
+            return float(obj.input_quantity_kg) if obj.input_quantity_kg else None
+        except Exception:
+            return float(obj.input_quantity_kg) if obj.input_quantity_kg else None
+    
+    def get_actual_received_kg(self, obj):
+        """Get actual received quantity from verification record (if reported)"""
+        try:
+            from manufacturing.models.batch_verification import BatchReceiptVerification
+            
+            verification = BatchReceiptVerification.objects.filter(
+                batch=obj.batch,
+                process_execution=obj.process_execution,
+                action='reported'
+            ).order_by('-received_at').first()
+            
+            if verification and verification.actual_quantity_kg:
+                return float(verification.actual_quantity_kg)
+            
+            return None
+        except Exception:
+            return None
+    
     class Meta:
         model = BatchProcessCompletion
         fields = [
@@ -189,11 +229,13 @@ class BatchProcessCompletionSerializer(serializers.ModelSerializer):
             'rework_quantity_kg', 'is_rework_cycle', 'rework_cycle_number',
             'parent_completion', 'completion_notes', 'defect_description',
             'ok_percentage', 'scrap_percentage', 'rework_percentage',
-            'rework_badge', 'created_at', 'updated_at'
+            'rework_badge', 'expected_received_kg', 'actual_received_kg',
+            'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'completed_at', 'ok_percentage', 'scrap_percentage',
-            'rework_percentage', 'rework_badge', 'created_at', 'updated_at'
+            'rework_percentage', 'rework_badge', 'expected_received_kg',
+            'actual_received_kg', 'created_at', 'updated_at'
         ]
 
 

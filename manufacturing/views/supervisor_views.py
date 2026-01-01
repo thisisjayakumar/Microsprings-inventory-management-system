@@ -777,6 +777,22 @@ class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = super().get_queryset()
         
+        # Filter by batch_id if provided (batch_id refers to the Batch model's id field)
+        batch_id = self.request.query_params.get('batch_id')
+        if batch_id:
+            try:
+                queryset = queryset.filter(batch_id=int(batch_id))
+            except (ValueError, TypeError):
+                pass
+        
+        # Filter by process_execution_id if provided
+        process_execution_id = self.request.query_params.get('process_execution_id')
+        if process_execution_id:
+            try:
+                queryset = queryset.filter(process_execution_id=int(process_execution_id))
+            except (ValueError, TypeError):
+                pass
+        
         # Filter by status
         if self.request.query_params.get('on_hold') == 'true':
             queryset = queryset.filter(is_on_hold=True)
@@ -817,6 +833,8 @@ class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def report(self, request):
         """Report batch receipt issue"""
+        from manufacturing.models.batch_verification import BatchReceiptLog
+        
         serializer = BatchReceiptReportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
@@ -836,6 +854,28 @@ class BatchReceiptVerificationViewSet(viewsets.ModelViewSet):
                 report_reason=validated_data['report_reason'],
                 report_details=validated_data.get('report_details', '')
             )
+            
+            # If actual_quantity_kg is provided, update the BatchReceiptLog's received_quantity_kg
+            # This ensures the actual received quantity is stored and used for completion
+            if validated_data.get('actual_quantity_kg'):
+                actual_qty = validated_data['actual_quantity_kg']
+                
+                # Find the most recent receipt log for this batch and process
+                receipt_log = BatchReceiptLog.objects.filter(
+                    batch=batch,
+                    to_process=process_execution.process
+                ).order_by('-handed_over_at', '-created_at').first()
+                
+                if receipt_log:
+                    # Update the received quantity with actual quantity from report
+                    receipt_log.received_quantity_kg = actual_qty
+                    receipt_log.received_by = request.user
+                    receipt_log.received_at = timezone.now()
+                    receipt_log.is_verified = True
+                    receipt_log.has_issues = True
+                    receipt_log.verification_record = verification
+                    receipt_log.receipt_notes = f"Issue reported: {verification.get_report_reason_display()}. Expected: {validated_data['expected_quantity_kg']} kg, Actual: {actual_qty} kg"
+                    receipt_log.save()
             
             # Log activity
             ProcessActivityLog.log_batch_verification(verification, request.user)
