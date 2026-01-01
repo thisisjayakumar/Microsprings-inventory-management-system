@@ -163,11 +163,17 @@ DATABASES = {
 
 DATABASES['default']['CONN_HEALTH_CHECKS'] = True
 
-# If TEST_DATABASE_NAME is not set, use the same database (for local test clone)
-# This allows tests to run against a local clone database
-# Note: Use --keepdb flag when running tests to reuse existing database
+# Test Database Configuration
+# If TEST_DATABASE_NAME is set in .env, use that. Otherwise, use isolated test runner.
+# The IsolatedMySQLTestRunner will create a random database name for each test run.
 if DATABASES['default']['TEST']['NAME'] is None:
-    DATABASES['default']['TEST']['NAME'] = DATABASES['default']['NAME']
+    # Don't set a default - let the custom test runner handle it
+    # This ensures isolation with random database names
+    DATABASES['default']['TEST']['NAME'] = None
+
+# Custom Test Runner for Isolated MySQL Databases
+# This creates a new database with random suffix for each test run
+TEST_RUNNER = 'microsprings_inventory_system.test_runner.IsolatedMySQLTestRunner'
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

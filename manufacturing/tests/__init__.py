@@ -1,4 +1,1 @@
-"""
-Manufacturing Tests Package
-"""
-
+# Test package for manufacturing app

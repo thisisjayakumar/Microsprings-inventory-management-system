@@ -880,11 +880,12 @@ class MOProcessExecutionMinimalSerializer(serializers.ModelSerializer):
     class Meta:
         model = MOProcessExecution
         # Highly optimized: Only include fields used in production-head MO detail page
-        # REMOVED UNUSED FIELDS: process, process_code, actual_start_time, actual_end_time,
+        # NOTE: 'process' field is included (as ID) because it's needed for fetching batch receipt logs
+        # REMOVED UNUSED FIELDS: process_code, actual_start_time, actual_end_time,
         # assigned_operator, assigned_operator_name, progress_percentage, duration_minutes,
         # is_overdue, step_count, created_at, updated_at
         fields = [
-            'id', 'process_name', 'status', 'status_display', 'sequence_order',
+            'id', 'process', 'process_name', 'status', 'status_display', 'sequence_order',
             'assigned_supervisor', 'assigned_supervisor_name', 'batch_counts'
         ]
         read_only_fields = ['created_at', 'updated_at']

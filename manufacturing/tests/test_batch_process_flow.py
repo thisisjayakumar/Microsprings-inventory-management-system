@@ -136,27 +136,32 @@ class BatchProcessFlowTestCase(TestCase):
         )
         
         # Create processes (Coiling, Stress_Relieving, Grinding)
+        # Note: Process model requires a 'code' field (IntegerField)
         self.process_coiling = Process.objects.create(
             name='Coiling',
+            code=1,
             description='Coiling process',
             is_active=True
         )
         
         self.process_stress_relieving = Process.objects.create(
             name='Stress_Relieving',
+            code=2,
             description='Stress Relieving process',
             is_active=True
         )
         
         self.process_grinding = Process.objects.create(
             name='Grinding',
+            code=3,
             description='Grinding process',
             is_active=True
         )
         
         # Create manufacturing order
+        # Note: mo_id has max_length=20, so keep it short
         self.mo = ManufacturingOrder.objects.create(
-            mo_id='MO_TEST_BATCH_FLOW_001',
+            mo_id='MO-TEST-001',  # Shortened to fit max_length=20
             product_code=self.product,
             quantity=1000,  # 1000 pieces
             priority='high',
@@ -181,15 +186,17 @@ class BatchProcessFlowTestCase(TestCase):
         Test the complete batch process flow with multiple process steps.
         """
         # Step 1: Approve MO
+        # Use the update_mo_details endpoint with action='approve'
         self.client.force_authenticate(user=self.manager_user)
-        approval_response = self.client.post(
-            f'/api/manufacturing/manufacturing-orders/{self.mo.id}/approve/'
+        approval_response = self.client.patch(
+            f'/api/manufacturing/manufacturing-orders/{self.mo.id}/update_mo_details/',
+            {'action': 'approve', 'notes': 'Test approval'}
         )
         self.assertEqual(approval_response.status_code, status.HTTP_200_OK)
         
         # Refresh MO from DB
         self.mo.refresh_from_db()
-        self.assertEqual(self.mo.status, 'approved')
+        self.assertEqual(self.mo.status, 'mo_approved')
         
         # Step 2: Initialize processes (this should create process executions)
         # Simulate process initialization by creating process executions manually
@@ -240,8 +247,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_1)
         
         # Get batch receipt logs for first process (should be empty initially)
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_1_id = process_exec_1.process.id if isinstance(process_exec_1.process, Process) else process_exec_1.process
         receipt_logs_response = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_1.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_1_id}'
         )
         self.assertEqual(receipt_logs_response.status_code, status.HTTP_200_OK)
         
@@ -262,11 +271,12 @@ class BatchProcessFlowTestCase(TestCase):
         self.assertEqual(verify_response.status_code, status.HTTP_201_CREATED)
         
         # Start batch process
+        # Note: The endpoint expects 'process_id' which is the ProcessExecution ID
         start_response = self.client.post(
             '/api/manufacturing/batch-process-executions/start/',
             {
                 'batch_id': batch.id,
-                'process_execution_id': process_exec_1.id
+                'process_id': process_exec_1.id  # The endpoint uses 'process_id' for ProcessExecution ID
             }
         )
         self.assertEqual(start_response.status_code, status.HTTP_200_OK)
@@ -280,8 +290,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_2)
         
         # Check receipt logs for second process (should be empty)
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_2_id = process_exec_2.process.id if isinstance(process_exec_2.process, Process) else process_exec_2.process
         receipt_logs_2 = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_2.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_2_id}'
         )
         self.assertEqual(receipt_logs_2.status_code, status.HTTP_200_OK)
         receipt_logs_data = receipt_logs_2.json()
@@ -291,6 +303,10 @@ class BatchProcessFlowTestCase(TestCase):
         # The frontend should show "Pending from Coiling" instead of quantity
         
         # Step 6: First supervisor completes batch with partial OK quantity (10kg)
+        # Note: Process execution should be in_progress before completion
+        process_exec_1.status = 'in_progress'
+        process_exec_1.save()
+        
         self.client.force_authenticate(user=self.supervisor_1)
         
         completion_response = self.client.post(
@@ -322,8 +338,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_2)
         
         # Get receipt logs for second process
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_2_id = process_exec_2.process.id if isinstance(process_exec_2.process, Process) else process_exec_2.process
         receipt_logs_2_after = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_2.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_2_id}'
         )
         self.assertEqual(receipt_logs_2_after.status_code, status.HTTP_200_OK)
         receipt_logs_data_2 = receipt_logs_2_after.json()
@@ -342,11 +360,12 @@ class BatchProcessFlowTestCase(TestCase):
         self.assertEqual(verify_response_2.status_code, status.HTTP_201_CREATED)
         
         # Start batch process in second process
+        # Note: The endpoint expects 'process_id' which is the ProcessExecution ID
         start_response_2 = self.client.post(
             '/api/manufacturing/batch-process-executions/start/',
             {
                 'batch_id': batch.id,
-                'process_execution_id': process_exec_2.id
+                'process_id': process_exec_2.id  # The endpoint uses 'process_id' for ProcessExecution ID
             }
         )
         self.assertEqual(start_response_2.status_code, status.HTTP_200_OK)
@@ -356,6 +375,10 @@ class BatchProcessFlowTestCase(TestCase):
         process_exec_2.save()
         
         # Step 8: Second supervisor completes with OK quantity (8kg)
+        # Ensure process execution is in_progress before completion
+        process_exec_2.status = 'in_progress'
+        process_exec_2.save()
+        
         completion_response_2 = self.client.post(
             '/api/manufacturing/batch-completions/',
             {
@@ -385,8 +408,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_3)
         
         # Get receipt logs for third process
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_3_id = process_exec_3.process.id if isinstance(process_exec_3.process, Process) else process_exec_3.process
         receipt_logs_3 = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_3.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_3_id}'
         )
         self.assertEqual(receipt_logs_3.status_code, status.HTTP_200_OK)
         receipt_logs_data_3 = receipt_logs_3.json()
@@ -405,11 +430,12 @@ class BatchProcessFlowTestCase(TestCase):
         self.assertEqual(verify_response_3.status_code, status.HTTP_201_CREATED)
         
         # Start batch process in third process
+        # Note: The endpoint expects 'process_id' which is the ProcessExecution ID
         start_response_3 = self.client.post(
             '/api/manufacturing/batch-process-executions/start/',
             {
                 'batch_id': batch.id,
-                'process_execution_id': process_exec_3.id
+                'process_id': process_exec_3.id  # The endpoint uses 'process_id' for ProcessExecution ID
             }
         )
         self.assertEqual(start_response_3.status_code, status.HTTP_200_OK)
@@ -482,8 +508,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_2)
         
         # Check receipt logs (should be empty)
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_2_id = process_exec_2.process.id if isinstance(process_exec_2.process, Process) else process_exec_2.process
         receipt_logs = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_2.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_2_id}'
         )
         receipt_logs_data = receipt_logs.json()
         self.assertEqual(len(receipt_logs_data), 0)
@@ -505,7 +533,10 @@ class BatchProcessFlowTestCase(TestCase):
         """
         # Approve MO
         self.client.force_authenticate(user=self.manager_user)
-        self.client.post(f'/api/manufacturing/manufacturing-orders/{self.mo.id}/approve/')
+        self.client.patch(
+            f'/api/manufacturing/manufacturing-orders/{self.mo.id}/update_mo_details/',
+            {'action': 'approve', 'notes': 'Test approval'}
+        )
         
         # Create process executions with specific sequence orders
         # Note: Supervisor 2 is assigned to first process (sequence_order=1)
@@ -540,6 +571,10 @@ class BatchProcessFlowTestCase(TestCase):
         self.client.force_authenticate(user=self.supervisor_2)
         self.assertEqual(float(batch.rm_released_kg), 40.0)
         
+        # Set process execution to in_progress before completion
+        process_exec_1.status = 'in_progress'
+        process_exec_1.save()
+        
         # Supervisor 2 completes first process
         completion = self.client.post(
             '/api/manufacturing/batch-completions/',
@@ -556,8 +591,10 @@ class BatchProcessFlowTestCase(TestCase):
         
         # Supervisor 1 (second process) should see 15kg from receipt log
         self.client.force_authenticate(user=self.supervisor_1)
+        # Note: process_id parameter expects Process model ID, not ProcessExecution ID
+        process_2_id = process_exec_2.process.id if isinstance(process_exec_2.process, Process) else process_exec_2.process
         receipt_logs = self.client.get(
-            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_exec_2.id}'
+            f'/api/manufacturing/batch-receipt-logs/for_supervisor_process/?process_id={process_2_id}'
         )
         receipt_logs_data = receipt_logs.json()
         self.assertEqual(len(receipt_logs_data), 1)
