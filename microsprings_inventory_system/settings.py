@@ -150,10 +150,24 @@ DATABASES = {
         },
         'CONN_MAX_AGE': config('DATABASE_CONN_MAX_AGE', default=600, cast=int), 
         'CONN_HEALTH_CHECKS': True,
+        # Test database configuration
+        # If TEST_DATABASE_NAME is set in .env, use that. Otherwise, use same database name.
+        # WARNING: Tests will modify the database. Use a clone/test database.
+        'TEST': {
+            'NAME': config('TEST_DATABASE_NAME', default=None),  # Set in .env to use specific test DB
+            'CHARSET': 'utf8mb4',
+            'COLLATION': 'utf8mb4_unicode_ci',
+        },
     }
 }
 
 DATABASES['default']['CONN_HEALTH_CHECKS'] = True
+
+# If TEST_DATABASE_NAME is not set, use the same database (for local test clone)
+# This allows tests to run against a local clone database
+# Note: Use --keepdb flag when running tests to reuse existing database
+if DATABASES['default']['TEST']['NAME'] is None:
+    DATABASES['default']['TEST']['NAME'] = DATABASES['default']['NAME']
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

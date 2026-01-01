@@ -55,8 +55,8 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['status', 'priority', 'shift', 'material_type']
     search_fields = ['mo_id', 'product_code__product_code', 'product_code__internal_product_code', 'product_code__material__material_name']
-    ordering_fields = ['created_at', 'planned_start_date', 'delivery_date', 'mo_id']
-    ordering = ['-created_at']
+    ordering_fields = ['created_at', 'planned_start_date', 'delivery_date', 'mo_id', 'id']
+    ordering = ['-created_at', '-id']
     pagination_class = pagination.LimitOffsetPagination
 
     def get_queryset(self):
@@ -75,6 +75,11 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(created_at__gte=start_date)
         if end_date:
             queryset = queryset.filter(created_at__lte=end_date)
+        
+        # Filter based on user role and department
+        user = self.request.user
+        user_roles = user.user_roles.filter(is_active=True).values_list('role__name', flat=True)
+        user_roles = [role.lower() for role in user_roles]
         
         # Filter based on user role and department
         user = self.request.user
@@ -230,12 +235,7 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Validate MO is assigned to this RM Store user
-        if mo.assigned_rm_store != request.user:
-            return Response(
-                {'error': 'This MO is not assigned to you'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
+        # Note: assigned_rm_store field removed - all RM Store users can complete allocation for any MO
         
         # Validate MO status
         if mo.status not in ['on_hold', 'in_progress']:

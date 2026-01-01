@@ -273,24 +273,38 @@ class ManufacturingOrder(models.Model):
                 'blocked_batches': []
             }
             
-            # Release reserved RM allocations
-            from inventory.models import RMStockBalance
-            
-            reserved_allocations = self.rm_allocations.filter(status='reserved')
-            for allocation in reserved_allocations:
+            # Release reserved and locked RM allocations
+            # Include both 'reserved' and 'locked' allocations since batches that have started
+            # will have their allocations locked
+            allocations_to_release = self.rm_allocations.filter(status__in=['reserved', 'locked'])
+            for allocation in allocations_to_release:
+                allocation_status_before = allocation.status
                 released_resources['rm_allocations'].append({
                     'material': str(allocation.raw_material),
                     'quantity_kg': float(allocation.allocated_quantity_kg),
-                    'allocation_id': allocation.id
+                    'allocation_id': allocation.id,
+                    'status': allocation_status_before  # Include status for tracking
                 })
                 
-                stock_balance, created = RMStockBalance.objects.get_or_create(
-                    raw_material=allocation.raw_material,
-                    defaults={'available_quantity': Decimal('0')}
-                )
-                stock_balance.available_quantity += allocation.allocated_quantity_kg
-                stock_balance.save()
+                # Handle stock balance update based on allocation status
+                # For locked allocations: release_allocation() will add back to RMStockBalanceHeat
+                # For reserved allocations: we only decremented RMStockBalance, so only add back to RMStockBalance
+                # NOTE: Reserved allocations don't decrement RMStockBalanceHeat, so we don't add back to it
+                if allocation.status == 'reserved':
+                    # For reserved allocations, add back to RMStockBalance (only this was decremented during reservation)
+                    from inventory.models import RMStockBalance
+                    stock_balance, created = RMStockBalance.objects.get_or_create(
+                        raw_material=allocation.raw_material,
+                        defaults={'available_quantity': Decimal('0')}
+                    )
+                    stock_balance.available_quantity += allocation.allocated_quantity_kg
+                    stock_balance.save()
                 
+                # Release the allocation (for locked, this adds back to RMStockBalanceHeat; for reserved, just updates status)
+                # IMPORTANT: This changes status to 'released', which will exclude it from reserved quantity calculations
+                allocation.release_allocation()
+                
+                # Create history record
                 RMAllocationHistory.objects.create(
                     allocation=allocation,
                     action='released',
@@ -315,15 +329,13 @@ class ManufacturingOrder(models.Model):
                             'released_quantity_kg': float(allocation.allocated_quantity_kg),
                             'reason': f'MO {self.mo_id} stopped - RM returned to stock',
                             'stopped_by': stopped_by_user.get_full_name() or stopped_by_user.email,
-                            'stock_returned_to': 'RM Store'
+                            'stock_returned_to': 'RM Store',
+                            'previous_status': allocation_status_before
                         },
                         created_by=stopped_by_user
                     )
                 except Exception as e:
                     logger.warning(f"Failed to create RM release transaction history: {str(e)}")
-                
-                allocation.status = 'released'
-                allocation.save()
             
             # Release FG reservations
             from fg_store.models import FGStockReservation

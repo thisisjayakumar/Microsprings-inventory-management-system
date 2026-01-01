@@ -3,6 +3,7 @@ python3 manage.py create_admin
 python3 manage.py setup_demo_users
 
 python3 manage.py import_raw_materials management_data/rawmaterials.csv
+python3 manage.py init_break_types
 
 python3 manage.py import_vendors_from_csv management_data/vendors.csv
 python3 manage.py import_customers_from_csv management_data/customers_with_ids.csv
@@ -10,4 +11,4 @@ python3 manage.py import_customers_from_csv management_data/customers_with_ids.c
 python3 manage.py import_spring_processes management_data/spring_process.csv
 python3 manage.py import_stamp_processes management_data/stamp_process.csv
 python3 manage.py import_heat_numbers management_data/heat_numbers.csv
-python3 manage.py init_break_types
+
