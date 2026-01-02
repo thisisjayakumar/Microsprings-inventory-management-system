@@ -585,6 +585,83 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             
             logger.info(f"✅ BatchReceiptLog created: ID={receipt_log.id}, quantity={receipt_log.handed_over_quantity_kg} kg, is_rework={receipt_log.is_rework_batch}, cycle={receipt_log.rework_cycle_number}")
             
+            # If this is a rework batch moving to a new process, create ReworkBatch object for the next process
+            if is_rework and rework_cycle > 0:
+                # Get currently active supervisor for the next process
+                from processes.models import DailySupervisorStatus
+                today = timezone.now().date()
+                current_shift = next_process._get_current_shift()
+                
+                supervisor_status = DailySupervisorStatus.objects.filter(
+                    date=today,
+                    work_center=next_process.process,
+                    shift=current_shift
+                ).first()
+                
+                # Use active supervisor from daily status, fallback to next_process.assigned_supervisor or current supervisor
+                rework_supervisor = None
+                if supervisor_status:
+                    rework_supervisor = supervisor_status.active_supervisor
+                elif next_process.assigned_supervisor:
+                    rework_supervisor = next_process.assigned_supervisor
+                elif current_process_execution.assigned_supervisor:
+                    rework_supervisor = current_process_execution.assigned_supervisor
+                
+                if rework_supervisor:
+                    # Use transaction with select_for_update to prevent race conditions
+                    from django.db import transaction
+                    
+                    try:
+                        with transaction.atomic():
+                            # Use select_for_update to lock the row and prevent concurrent creation
+                            # Check for ANY existing rework batch for this batch + process + cycle (any status)
+                            # This ensures only ONE ReworkBatch exists per cycle per process
+                            existing_rework = ReworkBatch.objects.select_for_update().filter(
+                                original_batch=batch,
+                                process_execution=next_process,
+                                rework_cycle_number=rework_cycle
+                            ).first()
+                            
+                            if not existing_rework:
+                                # Get defect description from completion record or parent completion
+                                defect_description = ""
+                                if completion_record and completion_record.defect_description:
+                                    defect_description = completion_record.defect_description
+                                elif completion_record and completion_record.parent_completion:
+                                    defect_description = completion_record.parent_completion.defect_description or ""
+                                
+                                # Create rework batch for the next process
+                                rework_batch = ReworkBatch.objects.create(
+                                    original_batch=batch,
+                                    process_execution=next_process,
+                                    completion_record=completion_record,
+                                    rework_quantity_kg=ok_quantity_kg,
+                                    status='pending',
+                                    source='process_supervisor',
+                                    assigned_supervisor=rework_supervisor,
+                                    rework_cycle_number=rework_cycle,
+                                    defect_description=defect_description or f"Rework cycle {rework_cycle} from {current_process_execution.process.name}"
+                                )
+                                
+                                logger.info(f"✅ ReworkBatch created: ID={rework_batch.id}, batch={batch.batch_id}, process={next_process.process.name}, cycle={rework_cycle}, quantity={ok_quantity_kg} kg")
+                            else:
+                                # ReworkBatch already exists - don't create duplicate
+                                # Log a warning if it's a different status (might indicate an issue)
+                                logger.warning(
+                                    f"⚠️  ReworkBatch already exists (ID={existing_rework.id}, status={existing_rework.status}) "
+                                    f"for batch={batch.batch_id}, process={next_process.process.name}, cycle={rework_cycle}. "
+                                    f"Skipping creation. Existing quantity: {existing_rework.rework_quantity_kg} kg, "
+                                    f"New receipt log quantity: {ok_quantity_kg} kg"
+                                )
+                    except Exception as e:
+                        # Log error but don't fail the entire operation
+                        logger.error(
+                            f"❌ Error creating/checking ReworkBatch for batch={batch.batch_id}, "
+                            f"process={next_process.process.name}, cycle={rework_cycle}: {str(e)}"
+                        )
+                else:
+                    logger.warning(f"⚠️  No supervisor found for rework batch creation: batch={batch.batch_id}, process={next_process.process.name}")
+            
             # Notify next supervisor with rework indicator
             if next_process.assigned_supervisor:
                 batch_display_id = f"{batch.batch_id}{rework_indicator}"
