@@ -438,19 +438,10 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
             
             # If rework quantity > 0, create rework batch
             if completion.rework_quantity_kg > 0:
-                # Get currently active supervisor for this process
-                from processes.models import DailySupervisorStatus
-                today = timezone.now().date()
-                current_shift = process_execution._get_current_shift()
-                
-                supervisor_status = DailySupervisorStatus.objects.filter(
-                    date=today,
-                    work_center=process_execution.process,
-                    shift=current_shift
-                ).first()
-                
-                # Use active supervisor from daily status, fallback to request.user
-                rework_supervisor = supervisor_status.active_supervisor if supervisor_status else request.user
+                # Assign rework batch to the supervisor who completed the batch
+                # This ensures the rework shows up in their dashboard
+                # The supervisor who completed the batch is responsible for the rework
+                rework_supervisor = request.user
                 
                 rework_batch = ReworkBatch.objects.create(
                     original_batch=batch,
@@ -694,9 +685,19 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
         if any(role in ['admin', 'manager', 'production_head'] for role in user_roles):
             return queryset
         
-        # Supervisors see their assigned rework
+        # Supervisors see ONLY their assigned rework
+        # IMPORTANT: Rework batches from one process should NOT be visible to next process supervisors
+        # Each supervisor should only see rework batches assigned to them
         if 'supervisor' in user_roles:
-            return queryset.filter(assigned_supervisor=user)
+            # Always filter by assigned_supervisor - even if process_execution filter is used
+            queryset = queryset.filter(assigned_supervisor=user)
+            
+            # If process_execution filter is provided, apply it but still maintain assigned_supervisor filter
+            process_execution_id = self.request.query_params.get('process_execution')
+            if process_execution_id:
+                queryset = queryset.filter(process_execution_id=process_execution_id)
+            
+            return queryset
         
         return queryset.none()
     
@@ -750,7 +751,9 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                     rework_kg=Decimal(str(rework_kg))
                 )
                 
-                # Move OK to next process with rework indicator
+                # Move OK to next process as NORMAL batch (not rework)
+                # The OK quantity from rework completion should be treated as normal batch for next supervisor
+                # Only the rework_kg stays with current supervisor for another rework cycle
                 if ok_kg > 0:
                     # Use the BatchProcessCompletionViewSet's _move_to_next_process method
                     # Create an instance to access the method
@@ -759,8 +762,8 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                         batch=rework_batch.original_batch,
                         current_process_execution=rework_batch.process_execution,
                         ok_quantity_kg=ok_kg,
-                        is_rework=True,
-                        rework_cycle=rework_batch.rework_cycle_number,
+                        is_rework=False,  # OK quantity goes as normal batch, not rework
+                        rework_cycle=0,  # Reset cycle for normal batch
                         completion_record=completion
                     )
                 

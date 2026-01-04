@@ -52,6 +52,11 @@ urlpatterns = [
     path('admin/sync-profiles/', admin_views.sync_user_profile_status, name='sync_user_profiles'),
     path('admin/department-summary/', admin_views.department_summary, name='department_summary'),
     path('admin/role-permissions-matrix/', admin_views.role_permissions_matrix, name='role_permissions_matrix'),
+    path('admin/reset-database/', admin_views.reset_database, name='reset_database'),
+    path('admin/backup-database/', admin_views.backup_database, name='backup_database'),
+    path('admin/backup-status/', admin_views.backup_status, name='backup_status'),
+    path('admin/restore-database/', admin_views.restore_database, name='restore_database'),
+    path('admin/list-backups/', admin_views.list_backups, name='list_backups'),
     
     # Include router URLs
     path('', include(router.urls)),

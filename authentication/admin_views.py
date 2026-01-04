@@ -12,6 +12,13 @@ from django.db import transaction
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models.deletion import ProtectedError
+from django.core.management import call_command
+from django.conf import settings
+import logging
+import threading
+import json
+from pathlib import Path
+from datetime import datetime
 
 from .models import CustomUser, UserProfile, Role, UserRole, LoginSession
 from .admin_serializers import (
@@ -21,6 +28,8 @@ from .admin_serializers import (
 )
 from utils.enums import DepartmentChoices
 from .permissions import IsAdminOrManager
+
+logger = logging.getLogger(__name__)
 
 
 class AdminUserManagementViewSet(viewsets.ModelViewSet):
@@ -481,4 +490,419 @@ def role_permissions_matrix(request):
     ]
     
     return Response(matrix)
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrManager])
+def reset_database(request):
+    """
+    Reset/truncate the entire database
+    WARNING: This will delete ALL data!
+    Only allowed in DEBUG mode or with explicit force flag.
+    """
+    # Safety check: Only allow in DEBUG mode
+    if not settings.DEBUG:
+        return Response(
+            {
+                'error': 'Database reset is only allowed in DEBUG mode!',
+                'message': 'This endpoint is disabled in production for safety.'
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Additional confirmation check
+    confirm_text = request.data.get('confirm_text', '')
+    if confirm_text != 'RESET DATABASE':
+        return Response(
+            {
+                'error': 'Invalid confirmation text',
+                'message': 'You must provide confirm_text="RESET DATABASE" to proceed.'
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # Get options from request
+        load_fixtures = request.data.get('load_fixtures', False)
+        skip_migrations = request.data.get('skip_migrations', False)
+        
+        # Call the management command
+        from io import StringIO
+        from django.core.management import call_command
+        
+        output = StringIO()
+        command_kwargs = {
+            'force': True,  # Skip confirmation (we already checked)
+            'stdout': output,
+            'stderr': output
+        }
+        if load_fixtures:
+            command_kwargs['load_fixtures'] = True
+        if skip_migrations:
+            command_kwargs['skip_migrations'] = True
+        
+        call_command('reset_database', **command_kwargs)
+        
+        output_text = output.getvalue()
+        
+        logger.warning(f'Database reset performed by user: {request.user.username} ({request.user.id})')
+        
+        return Response({
+            'success': True,
+            'message': 'Database reset completed successfully',
+            'output': output_text
+        })
+        
+    except Exception as e:
+        logger.error(f'Database reset failed: {str(e)}', exc_info=True)
+        return Response(
+            {
+                'error': 'Database reset failed',
+                'message': str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrManager])
+def backup_database(request):
+    """
+    Start a database backup process (async)
+    Returns immediately with acknowledgement
+    """
+    # Safety check: Only allow in DEBUG mode
+    if not settings.DEBUG:
+        return Response(
+            {
+                'error': 'Database backup is only allowed in DEBUG mode!',
+                'message': 'This endpoint is disabled in production for safety.'
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    try:
+        backup_format = request.data.get('format', 'sql')  # 'sql' or 'json'
+        
+        # Get backup directory
+        backup_dir = Path(settings.BASE_DIR) / 'backups'
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create status file
+        status_file = backup_dir / 'backup_status.json'
+        status = {
+            'status': 'in_progress',
+            'started_at': datetime.now().isoformat(),
+            'format': backup_format,
+            'initiated_by': request.user.username,
+            'backup_filename': None,
+            'backup_path': None,
+            'file_size_mb': None,
+            'error': None
+        }
+        
+        with open(status_file, 'w') as f:
+            json.dump(status, f, indent=2)
+        
+        # Run backup in background thread
+        def run_backup():
+            try:
+                from io import StringIO
+                output = StringIO()
+                
+                # Call command with proper argument names
+                # Use dictionary unpacking to pass 'format' (Python keyword) as argument
+                cmd_kwargs = {
+                    'format': backup_format,  # This is the --format argument
+                    'output_dir': str(backup_dir),
+                    'stdout': output,
+                    'stderr': output,
+                    'verbosity': 1
+                }
+                call_command('backup_database', **cmd_kwargs)
+                
+                # Read metadata from the backup command output
+                # The command creates a .meta.json file
+                # Find the most recent backup metadata
+                backup_files = sorted(
+                    backup_dir.glob(f'*.meta.json'),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                
+                # Find the most recent backup file (not just metadata)
+                # Look for .sql files created in the last minute
+                recent_backup_files = sorted(
+                    backup_dir.glob('*.sql'),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True
+                )
+                
+                if recent_backup_files:
+                    # Get the most recent backup file
+                    latest_backup = recent_backup_files[0]
+                    meta_file = backup_dir / f'{latest_backup.name}.meta.json'
+                    
+                    if meta_file.exists():
+                        with open(meta_file, 'r') as f:
+                            metadata = json.load(f)
+                            status['status'] = 'completed'
+                            status['backup_filename'] = metadata.get('backup_filename')
+                            status['backup_path'] = metadata.get('backup_path')
+                            status['file_size_mb'] = metadata.get('file_size_mb')
+                            status['completed_at'] = datetime.now().isoformat()
+                    else:
+                        # No metadata, create from file stats
+                        stat = latest_backup.stat()
+                        status['status'] = 'completed'
+                        status['backup_filename'] = latest_backup.name
+                        status['backup_path'] = str(latest_backup)
+                        status['file_size_mb'] = round(stat.st_size / (1024 * 1024), 2)
+                        status['completed_at'] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+                else:
+                    # No backup files found
+                    status['status'] = 'completed'
+                    status['completed_at'] = datetime.now().isoformat()
+                    status['error'] = 'Backup completed but file not found'
+                    
+            except Exception as e:
+                logger.error(f'Backup failed: {str(e)}', exc_info=True)
+                status['status'] = 'failed'
+                status['error'] = str(e)
+                status['completed_at'] = datetime.now().isoformat()
+            finally:
+                # Update status file
+                with open(status_file, 'w') as f:
+                    json.dump(status, f, indent=2)
+        
+        # Start background thread
+        thread = threading.Thread(target=run_backup, daemon=True)
+        thread.start()
+        
+        logger.info(f'Database backup initiated by user: {request.user.username} ({request.user.id})')
+        
+        return Response({
+            'success': True,
+            'message': 'Backup process started',
+            'status': 'in_progress',
+            'format': backup_format
+        })
+        
+    except Exception as e:
+        logger.error(f'Backup initiation failed: {str(e)}', exc_info=True)
+        return Response(
+            {
+                'error': 'Failed to start backup',
+                'message': str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminOrManager])
+def backup_status(request):
+    """
+    Get current backup status
+    """
+    try:
+        backup_dir = Path(settings.BASE_DIR) / 'backups'
+        status_file = backup_dir / 'backup_status.json'
+        
+        if not status_file.exists():
+            return Response({
+                'status': 'no_backup',
+                'message': 'No backup has been created yet'
+            })
+        
+        with open(status_file, 'r') as f:
+            status = json.load(f)
+        
+        return Response(status)
+        
+    except Exception as e:
+        logger.error(f'Failed to get backup status: {str(e)}', exc_info=True)
+        return Response(
+            {
+                'error': 'Failed to get backup status',
+                'message': str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAdminOrManager])
+def restore_database(request):
+    """
+    Restore database from backup
+    """
+    # Safety check: Only allow in DEBUG mode
+    if not settings.DEBUG:
+        return Response(
+            {
+                'error': 'Database restore is only allowed in DEBUG mode!',
+                'message': 'This endpoint is disabled in production for safety.'
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+    
+    # Additional confirmation check
+    confirm_text = request.data.get('confirm_text', '')
+    if confirm_text != 'RESTORE DATABASE':
+        return Response(
+            {
+                'error': 'Invalid confirmation text',
+                'message': 'You must provide confirm_text="RESTORE DATABASE" to proceed.'
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        backup_path = request.data.get('backup_path')
+        if not backup_path:
+            return Response(
+                {
+                    'error': 'Missing backup_path',
+                    'message': 'You must provide the backup file path.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        backup_file = Path(backup_path)
+        if not backup_file.exists():
+            return Response(
+                {
+                    'error': 'Backup file not found',
+                    'message': f'Backup file does not exist: {backup_path}'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Call the management command
+        from io import StringIO
+        output = StringIO()
+        
+        call_command(
+            'restore_database',
+            str(backup_file),
+            force=True,  # Skip confirmation (we already checked)
+            stdout=output,
+            stderr=output
+        )
+        
+        output_text = output.getvalue()
+        
+        logger.warning(f'Database restore performed by user: {request.user.username} ({request.user.id}) from: {backup_path}')
+        
+        return Response({
+            'success': True,
+            'message': 'Database restore completed successfully',
+            'output': output_text
+        })
+        
+    except Exception as e:
+        logger.error(f'Database restore failed: {str(e)}', exc_info=True)
+        return Response(
+            {
+                'error': 'Database restore failed',
+                'message': str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAdminOrManager])
+def list_backups(request):
+    """
+    List all available backups
+    """
+    try:
+        backup_dir = Path(settings.BASE_DIR) / 'backups'
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        backups = []
+        
+        # Find all SQL backup files (regardless of naming pattern)
+        sql_files = list(backup_dir.glob('*.sql'))
+        logger.info(f'Found {len(sql_files)} SQL files in {backup_dir}')
+        
+        for backup_file in sql_files:
+            # Skip if it's a temporary file or very small (likely incomplete)
+            if backup_file.stat().st_size < 1000:  # Less than 1KB, probably incomplete
+                logger.warning(f'Skipping small file (likely incomplete): {backup_file.name}')
+                continue
+                
+            meta_file = backup_dir / f'{backup_file.name}.meta.json'
+            if meta_file.exists():
+                # Use metadata if available
+                try:
+                    with open(meta_file, 'r') as f:
+                        metadata = json.load(f)
+                        backups.append(metadata)
+                        logger.debug(f'Added backup from metadata: {backup_file.name}')
+                except Exception as e:
+                    logger.warning(f'Failed to read metadata for {backup_file.name}: {e}')
+                    # Fallback: create metadata from file stats
+                    stat = backup_file.stat()
+                    backups.append({
+                        'backup_filename': backup_file.name,
+                        'backup_path': str(backup_file),
+                        'format': 'sql',
+                        'created_at': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        'file_size_bytes': stat.st_size,
+                        'file_size_mb': round(stat.st_size / (1024 * 1024), 2),
+                    })
+            else:
+                # No metadata file, create entry from file stats
+                stat = backup_file.stat()
+                backups.append({
+                    'backup_filename': backup_file.name,
+                    'backup_path': str(backup_file),
+                    'format': 'sql',
+                    'created_at': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    'file_size_bytes': stat.st_size,
+                    'file_size_mb': round(stat.st_size / (1024 * 1024), 2),
+                })
+                logger.debug(f'Added backup from file stats: {backup_file.name}')
+        
+        # Find all JSON fixture backups (exclude metadata files and status files)
+        for backup_file in backup_dir.glob('*.json'):
+            # Skip metadata files and status files
+            if backup_file.name.endswith('.meta.json'):
+                continue
+            if backup_file.name == 'backup_status.json':
+                continue
+            
+            # JSON fixture backup
+            stat = backup_file.stat()
+            backups.append({
+                'backup_filename': backup_file.name,
+                'backup_path': str(backup_file),
+                'format': 'json',
+                'created_at': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                'file_size_bytes': stat.st_size,
+                'file_size_mb': round(stat.st_size / (1024 * 1024), 2),
+            })
+        
+        # Sort by creation date (newest first)
+        backups.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        logger.info(f'Found {len(backups)} backup files in {backup_dir}')
+        
+        return Response({
+            'count': len(backups),
+            'backups': backups
+        })
+        
+    except Exception as e:
+        logger.error(f'Failed to list backups: {str(e)}', exc_info=True)
+        return Response(
+            {
+                'error': 'Failed to list backups',
+                'message': str(e)
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 

@@ -16,11 +16,19 @@ class Command(BaseCommand):
             default=20,
             help='Number of demo users to create (default: 20)'
         )
+        parser.add_argument(
+            '--reset-passwords',
+            action='store_true',
+            help='Reset passwords for existing users to demo123'
+        )
 
     def handle(self, *args, **options):
         count = options['count']
+        reset_passwords = options.get('reset_passwords', False)
         
         self.stdout.write(f'Creating {count} demo users...')
+        if reset_passwords:
+            self.stdout.write(self.style.WARNING('Password reset mode: Existing users will have their passwords reset to demo123'))
         
         # Demo user templates based on role hierarchy
         user_templates = [
@@ -172,44 +180,74 @@ class Command(BaseCommand):
                         continue
                     
                     for first_name, last_name, email, emp_id in template['users']:
-                        if created_count >= count:
+                        # Only enforce count limit if not resetting passwords (to ensure all users get processed)
+                        if not reset_passwords and created_count >= count:
                             break
                         
-                        # Skip if user exists
-                        if CustomUser.objects.filter(email=email).exists():
-                            continue
+                        # Check if user exists
+                        existing_user = CustomUser.objects.filter(email=email).first()
                         
-                        # Create user
-                        user = CustomUser.objects.create(
-                            username=email,
-                            email=email,
-                            first_name=first_name,
-                            last_name=last_name,
-                            password=make_password('demo123'),  # Default demo password
-                            is_active=True
-                        )
+                        if existing_user:
+                            if reset_passwords:
+                                # Reset password for existing user
+                                existing_user.set_password('demo123')
+                                existing_user.save()
+                                self.stdout.write(f'Reset password for existing user: {email} ({role_name})')
+                            else:
+                                # Skip if user exists and not resetting passwords
+                                continue
+                            user = existing_user
+                        else:
+                            # Create new user
+                            user = CustomUser.objects.create(
+                                username=email,
+                                email=email,
+                                first_name=first_name,
+                                last_name=last_name,
+                                password=make_password('demo123'),  # Default demo password
+                                is_active=True
+                            )
                         
-                        # Create profile
-                        UserProfile.objects.create(
+                        # Create or update profile
+                        profile, profile_created = UserProfile.objects.get_or_create(
                             user=user,
-                            employee_id=emp_id,
-                            designation=designations[role_name],
-                            department=department,
-                            shift=random.choice(shifts) if role_name == 'fg_store' else None,
-                            date_of_joining=date.today() - timedelta(days=random.randint(30, 365)),
-                            phone_number=f'+1-555-{random.randint(1000, 9999)}',
-                            is_active=True
+                            defaults={
+                                'employee_id': emp_id,
+                                'designation': designations[role_name],
+                                'department': department,
+                                'shift': random.choice(shifts) if role_name == 'fg_store' else None,
+                                'date_of_joining': date.today() - timedelta(days=random.randint(30, 365)),
+                                'phone_number': f'+1-555-{random.randint(1000, 9999)}',
+                                'is_active': True
+                            }
                         )
                         
-                        # Assign role
-                        UserRole.objects.create(
+                        # Update profile if it already existed
+                        if not profile_created:
+                            profile.employee_id = emp_id
+                            profile.designation = designations[role_name]
+                            profile.department = department
+                            if role_name == 'fg_store':
+                                profile.shift = random.choice(shifts)
+                            profile.is_active = True
+                            profile.save()
+                        
+                        # Create or update role assignment
+                        user_role, role_created = UserRole.objects.get_or_create(
                             user=user,
                             role=role,
-                            assigned_by=None,
-                            is_active=True
+                            defaults={
+                                'assigned_by': None,
+                                'is_active': True
+                            }
                         )
                         
-                        # Create process supervisor assignments for supervisors
+                        # Update role if it already existed
+                        if not role_created:
+                            user_role.is_active = True
+                            user_role.save()
+                        
+                        # Create or update process supervisor assignments for supervisors
                         if role_name == 'supervisor':
                             process_names = {
                                 'coiling': ['Coiling Setup', 'Coiling Operation', 'Coiling QC'],
@@ -218,12 +256,21 @@ class Command(BaseCommand):
                                 'packing': ['Packing Setup', 'Packing Process', 'Label Printing']
                             }
                             
-                            ProcessSupervisor.objects.create(
+                            process_supervisor, ps_created = ProcessSupervisor.objects.get_or_create(
                                 supervisor=user,
-                                process_names=process_names.get(department, []),
-                                department=department,
-                                is_active=True
+                                defaults={
+                                    'process_names': process_names.get(department, []),
+                                    'department': department,
+                                    'is_active': True
+                                }
                             )
+                            
+                            # Update if it already existed
+                            if not ps_created:
+                                process_supervisor.process_names = process_names.get(department, [])
+                                process_supervisor.department = department
+                                process_supervisor.is_active = True
+                                process_supervisor.save()
                         
                         created_count += 1
                         self.stdout.write(f'Created: {email} ({role_name})')

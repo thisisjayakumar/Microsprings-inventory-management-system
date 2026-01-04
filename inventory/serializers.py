@@ -1053,6 +1053,7 @@ class RMReturnCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'raw_material': { 'required': False },
             'returned_from_location': { 'required': False, 'allow_null': True },
+            'heat_number': { 'required': False, 'allow_null': True },
         }
     
     def validate_quantity_kg(self, value):
@@ -1092,6 +1093,48 @@ class RMReturnCreateSerializer(serializers.ModelSerializer):
         # Set the returned_by to the current user
         validated_data['returned_by'] = self.context['request'].user
         
+        # Get batch for heat_number lookup if needed
+        batch = validated_data.get('batch')
+        raw_material = validated_data.get('raw_material')
+        
+        # If heat_number is not provided or is null, try to look it up from batch.released_coils
+        heat_number = validated_data.get('heat_number')
+        if not heat_number and batch:
+            # Try to get heat_number_string from initial_data (sent by frontend)
+            heat_number_string = None
+            try:
+                heat_number_string = (self.initial_data.get('heat_number_string') or '').strip()
+            except Exception:
+                pass
+            
+            # If not in initial_data, try to get from batch.released_coils
+            if not heat_number_string and batch.released_coils and isinstance(batch.released_coils, list) and len(batch.released_coils) > 0:
+                first_coil = batch.released_coils[0]
+                heat_number_string = first_coil.get('heat_number') or first_coil.get('heat_id') or ''
+                # Also try to get heat_id directly if available
+                heat_id = first_coil.get('heat_id') or first_coil.get('heat_number_id')
+                if heat_id:
+                    try:
+                        from inventory.models import HeatNumber
+                        heat_number = HeatNumber.objects.get(id=heat_id)
+                        validated_data['heat_number'] = heat_number
+                    except HeatNumber.DoesNotExist:
+                        pass
+            
+            # If we have heat_number_string but no heat_number object, look it up
+            if heat_number_string and not validated_data.get('heat_number'):
+                if raw_material:
+                    try:
+                        from inventory.models import HeatNumber
+                        heat_number = HeatNumber.objects.filter(
+                            heat_number=heat_number_string,
+                            raw_material=raw_material
+                        ).first()
+                        if heat_number:
+                            validated_data['heat_number'] = heat_number
+                    except Exception:
+                        pass
+        
         # Derive raw_material from heat_number if not provided
         if not validated_data.get('raw_material'):
             heat = validated_data.get('heat_number')
@@ -1102,50 +1145,92 @@ class RMReturnCreateSerializer(serializers.ModelSerializer):
                     'raw_material': 'Unable to derive raw material. Provide heat_number or raw_material.'
                 })
         
-        # Create the RM return
+        # Create the RM return with disposition='pending' (waiting for RM Store approval)
+        # No database operations (batch status, inventory transactions) until RM Store approves
         rm_return = RMReturn.objects.create(**validated_data)
         
-        # Mark the batch as returned to RM store
+        # Ensure disposition is pending (should be default, but make sure)
+        rm_return.disposition = 'pending'
+        rm_return.save(update_fields=['disposition'])
+        
         batch = validated_data['batch']
-        batch.status = 'returned_to_rm'
-        batch.save(update_fields=['status'])
         
-        # Create inventory transaction for the return
-        from .transaction_manager import InventoryTransactionManager
-        transaction_manager = InventoryTransactionManager()
-        
-        # Create return transaction (from process back to RM Store)
+        # Create notification to RM Store users
         try:
-            # Get RM Store location
-            rm_store_location = Location.objects.get(location_name='rm_store')
+            from notifications.models import WorkflowNotification
+            from django.contrib.auth.models import User
             
-            # Create transaction ID
-            transaction_id = f"TXN-RETURN-{rm_return.return_id}"
+            # Get coil number from batch.released_coils if available
+            coil_number = 'N/A'
+            if batch.released_coils and isinstance(batch.released_coils, list) and len(batch.released_coils) > 0:
+                first_coil = batch.released_coils[0]
+                coil_number = first_coil.get('coil_number') or first_coil.get('number') or 'N/A'
             
-            # Create the transaction
-            inventory_transaction = transaction_manager.create_transaction(
-                transaction_type='return',
-                product_id=validated_data['raw_material'].id,  # Raw material as product
-                quantity=validated_data['quantity_kg'],
-                transaction_datetime=timezone.now(),
-                created_by=self.context['request'].user,
-                location_from=validated_data['returned_from_location'],
-                location_to=rm_store_location,
-                manufacturing_order=validated_data['manufacturing_order'],
-                reference_type='process',
-                reference_id=validated_data['batch'].batch_id,
-                notes=f"RM Return: {validated_data['return_reason']}",
-                transaction_id=transaction_id
-            )
+            # Get heat number display
+            heat_number_display = 'N/A'
+            heat_number_obj = validated_data.get('heat_number')
+            if heat_number_obj:
+                heat_number_display = str(heat_number_obj.heat_number) if hasattr(heat_number_obj, 'heat_number') else str(heat_number_obj)
+            elif batch.released_coils and isinstance(batch.released_coils, list) and len(batch.released_coils) > 0:
+                # Fallback: get from released_coils if heat_number object not available
+                first_coil = batch.released_coils[0]
+                heat_number_display = first_coil.get('heat_number') or first_coil.get('heat_id') or 'N/A'
             
-            # Link transaction to return
-            rm_return.return_transaction = inventory_transaction
-            rm_return.save()
+            # Get all RM Store users (including managers who can access RM Store)
+            # Use UserRole to properly filter by active roles
+            from authentication.models import UserRole
+            
+            rm_store_user_roles = UserRole.objects.filter(
+                role__name__in=['rm_store', 'manager'],
+                is_active=True
+            ).select_related('user', 'role')
+            
+            rm_store_users = [ur.user for ur in rm_store_user_roles if ur.user.is_active]
+            
+            # Log how many users found
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Found {len(rm_store_users)} RM Store users for return {rm_return.return_id}")
+            
+            if not rm_store_users:
+                logger.warning(f"No RM Store users found! Check if users have 'rm_store' or 'manager' role assigned.")
+            
+            # Create notifications for each RM Store user
+            notifications_created = 0
+            for rm_user in rm_store_users:
+                try:
+                    WorkflowNotification.objects.create(
+                        notification_type='rm_return_pending',
+                        title=f'RM Return Request: Batch {batch.batch_id}',
+                        message=(
+                            f'Supervisor {self.context["request"].user.get_full_name()} has requested to return RM from '
+                            f'Batch {batch.batch_id} (MO: {validated_data["manufacturing_order"].mo_id}). '
+                            f'Heat Number: {heat_number_display}, Coil Number: {coil_number}, '
+                            f'Returned Qty: {validated_data["quantity_kg"]} kg, Reason: {validated_data["return_reason"]}. '
+                            f'Please review and approve the return.'
+                        ),
+                        recipient=rm_user,
+                        related_mo=validated_data['manufacturing_order'],
+                        related_batch=batch,
+                        action_required=True,
+                        priority='high',
+                        created_by=self.context['request'].user
+                    )
+                    notifications_created += 1
+                except Exception as notif_error:
+                    logger.error(f"Failed to create notification for user {rm_user.username}: {notif_error}", exc_info=True)
+            
+            # Log notification creation for debugging
+            logger.info(f"Created {notifications_created} RM return notifications for return {rm_return.return_id} (out of {len(rm_store_users)} RM Store users)")
             
         except Exception as e:
-            # If transaction creation fails, we should still keep the return record
-            # but log the error
-            print(f"Warning: Failed to create inventory transaction for return {rm_return.return_id}: {str(e)}")
+            # Don't fail the main operation if notification fails, but log it
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to create RM Store notifications for return {rm_return.return_id}: {e}", exc_info=True)
+        
+        # NOTE: No database operations (batch status update, inventory transactions) until RM Store approves
+        # These will be handled in the process_disposition endpoint when RM Store approves
         
         return rm_return
 
@@ -1175,14 +1260,61 @@ class RMReturnDispositionSerializer(serializers.Serializer):
         
         disposition = validated_data['disposition']
         received_kg = validated_data['received_kg']
+        user = self.context['request'].user
         
         with transaction.atomic():
-            # Update the RM return record
+            # Get RM Store location
+            rm_store_location = Location.objects.filter(location_name='rm_store').first()
+            if not rm_store_location:
+                rm_store_location = Location.objects.get_or_create(
+                    location_name='rm_store',
+                    defaults={'code': 'RM_STORE'}
+                )[0]
+            
+            # Create inventory transaction
+            from .utils import generate_transaction_id
+            transaction_id = generate_transaction_id('RM_RETURN')
+            
+            # Determine transaction type and locations based on disposition
+            if disposition == 'return_to_rm':
+                # Material returned to RM Store (from process location)
+                transaction_type = 'return'  # Return to Stock
+                location_from = instance.returned_from_location
+                location_to = rm_store_location
+                notes = f"RM Return {instance.return_id} - Material returned to RM Store. Reason: {instance.get_return_reason_display()}"
+            else:  # return_to_vendor
+                # Material returned to vendor (outward from RM Store)
+                transaction_type = 'outward'
+                location_from = rm_store_location
+                location_to = None  # Vendor location
+                notes = f"RM Return {instance.return_id} - Material returned to vendor. Reason: {instance.get_return_reason_display()}"
+            
+            # Add disposition notes if provided
+            if validated_data.get('disposition_notes'):
+                notes += f" | Notes: {validated_data['disposition_notes']}"
+            
+            inv_transaction = InventoryTransaction.objects.create(
+                transaction_id=transaction_id,
+                transaction_type=transaction_type,
+                product=None,  # Raw material transaction, no product
+                manufacturing_order=instance.manufacturing_order,
+                location_from=location_from,
+                location_to=location_to,
+                quantity=received_kg,
+                transaction_datetime=timezone.now(),
+                created_by=user,
+                reference_type='rm_return',
+                reference_id=str(instance.id),
+                notes=notes
+            )
+            
+            # Update the RM return record and link transaction
             instance.disposition = disposition
             instance.received_kg = received_kg
             instance.disposition_notes = validated_data.get('disposition_notes', '')
-            instance.disposed_by = self.context['request'].user
+            instance.disposed_by = user
             instance.disposed_at = timezone.now()
+            instance.return_transaction = inv_transaction
             instance.save()
             
             # Adjust RM stock based on disposition

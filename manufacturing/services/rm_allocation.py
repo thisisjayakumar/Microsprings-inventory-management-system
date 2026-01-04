@@ -612,7 +612,9 @@ class RMAllocationService:
         for allocation in allocations:
             alloc_data = {
                 'id': allocation.id,
-                'raw_material': allocation.raw_material.material_code,
+                'raw_material': allocation.raw_material.material_code,  # material_code
+                'raw_material_code': allocation.raw_material.material_code,  # explicit material_code field
+                'raw_material_name': allocation.raw_material.material_name if allocation.raw_material else None,  # material_name
                 'material_type': allocation.raw_material.material_type if allocation.raw_material else None,
                 'quantity_kg': float(allocation.allocated_quantity_kg),
                 'status': allocation.status,

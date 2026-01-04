@@ -1179,6 +1179,7 @@ class RMReturnViewSet(viewsets.ModelViewSet):
     - Supervisors can create returns
     - RM Store users can view and process returns (set disposition)
     """
+    permission_classes = [IsAuthenticated]  # Default: allow authenticated users
     queryset = RMReturn.objects.all()
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['disposition', 'returned_from_location', 'batch', 'manufacturing_order']
@@ -1189,11 +1190,14 @@ class RMReturnViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """
-        - Supervisors can create (POST)
+        - Supervisors can create (POST) and view returns for their batches (by_batch)
         - RM Store users can list, retrieve, and update disposition
         """
         if self.action == 'create':
             # Any authenticated supervisor can create returns
+            return [IsAuthenticated()]
+        elif self.action == 'by_batch':
+            # Allow supervisors to view returns for their batches
             return [IsAuthenticated()]
         else:
             # RM Store users can view and process
@@ -1290,16 +1294,31 @@ class RMReturnViewSet(viewsets.ModelViewSet):
     def by_batch(self, request):
         """
         Get RM returns for a specific batch
+        Accepts either batch_id (string) or batch (numeric ID)
         """
         batch_id = request.query_params.get('batch_id')
+        batch_numeric_id = request.query_params.get('batch')
         
-        if not batch_id:
+        if not batch_id and not batch_numeric_id:
             return Response({
                 'success': False,
-                'error': 'batch_id parameter is required'
+                'error': 'batch_id or batch parameter is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        returns = self.get_queryset().filter(batch__batch_id=batch_id)
+        # Filter by batch_id (string) or batch (numeric ID)
+        if batch_id:
+            returns = self.get_queryset().filter(batch__batch_id=batch_id)
+        else:
+            # Try to parse as integer for numeric ID
+            try:
+                batch_id_int = int(batch_numeric_id)
+                returns = self.get_queryset().filter(batch__id=batch_id_int)
+            except (ValueError, TypeError):
+                return Response({
+                    'success': False,
+                    'error': 'Invalid batch ID format'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
         serializer = self.get_serializer(returns, many=True)
         
         return Response({

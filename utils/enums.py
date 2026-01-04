@@ -353,6 +353,7 @@ class WorkflowNotificationTypeChoices(models.TextChoices):
     RM_ALLOCATION_REQUIRED = 'rm_allocation_required', _('RM Allocation Required')
     RM_ALLOCATED = 'rm_allocated', _('RM Allocated')
     RM_EXCESS_RELEASED = 'rm_excess_released', _('RM Excess Released')
+    RM_RETURN_PENDING = 'rm_return_pending', _('RM Return Pending Approval')
     PROCESS_ASSIGNED = 'process_assigned', _('Process Assigned')
     PROCESS_REASSIGNED = 'process_reassigned', _('Process Reassigned')
     SUPERVISOR_ASSIGNED = 'supervisor_assigned', _('Supervisor Assigned')

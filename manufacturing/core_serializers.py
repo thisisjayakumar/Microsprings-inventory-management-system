@@ -289,56 +289,34 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
 
 
 class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
-    """Detailed serializer for MO create/update/detail view"""
+    """Detailed serializer for MO create/update/detail view - optimized for MODetailPage frontend"""
     product_code = ProductBasicSerializer(read_only=True)
     # NOTE: assigned_rm_store removed - all RM store users see all MOs
     # NOTE: assigned_supervisor removed - supervisor tracking moved to work center level
-    created_by = UserBasicSerializer(read_only=True)
-    gm_approved_by = UserBasicSerializer(read_only=True)
-    rm_allocated_by = UserBasicSerializer(read_only=True)
-    status_history = MOStatusHistorySerializer(many=True, read_only=True)
-    transaction_history = MOTransactionHistorySerializer(many=True, read_only=True)
-    rm_returns = serializers.SerializerMethodField()
     related_purchase_orders = serializers.SerializerMethodField()
     
-    # Customer fields
-    from third_party.serializers import CustomerListSerializer
-    customer = CustomerListSerializer(read_only=True)
-    
     # Display fields
+    product_code_display = serializers.CharField(source='product_code.product_code', read_only=True)
+    product_code_value = serializers.CharField(source='product_code.product_code', read_only=True)
+    material_code = serializers.SerializerMethodField(read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     priority_display = serializers.CharField(source='get_priority_display', read_only=True)
     shift_display = serializers.CharField(source='get_shift_display', read_only=True)
     
     # Additional RM fields added by PH (using SerializerMethodField to avoid validation issues)
     additional_rm_added_by_ph_kg = serializers.SerializerMethodField(read_only=True)
-    additional_rm_added_by_ph_strips = serializers.SerializerMethodField(read_only=True)
-    last_additional_rm_added_by_ph_at = serializers.SerializerMethodField(read_only=True)
-    additional_rm_added_by_ph_user = serializers.SerializerMethodField(read_only=True)
+    
+    def get_material_code(self, obj):
+        """Get material code from product's material"""
+        if obj.product_code and obj.product_code.material:
+            return obj.product_code.material.material_code
+        return None
     
     def get_additional_rm_added_by_ph_kg(self, obj):
         """Get additional RM added by PH in kg"""
         if hasattr(obj, 'additional_rm_added_by_ph_kg'):
             return float(obj.additional_rm_added_by_ph_kg) if obj.additional_rm_added_by_ph_kg else 0.0
         return 0.0
-    
-    def get_additional_rm_added_by_ph_strips(self, obj):
-        """Get additional RM added by PH in strips"""
-        if hasattr(obj, 'additional_rm_added_by_ph_strips'):
-            return obj.additional_rm_added_by_ph_strips or 0
-        return 0
-    
-    def get_last_additional_rm_added_by_ph_at(self, obj):
-        """Get timestamp when additional RM was last added by PH"""
-        if hasattr(obj, 'last_additional_rm_added_by_ph_at') and obj.last_additional_rm_added_by_ph_at:
-            return obj.last_additional_rm_added_by_ph_at.isoformat()
-        return None
-    
-    def get_additional_rm_added_by_ph_user(self, obj):
-        """Get user who added additional RM"""
-        if hasattr(obj, 'additional_rm_added_by_ph_user') and obj.additional_rm_added_by_ph_user:
-            return obj.additional_rm_added_by_ph_user.get_full_name() or obj.additional_rm_added_by_ph_user.email
-        return None
     
     # Write-only fields for creation
     product_code_id = serializers.IntegerField(write_only=True)
@@ -365,28 +343,24 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = ManufacturingOrder
+        # Optimized: Only include fields actually used in MODetailPage frontend
+        # Removed unused fields: date_time, product_type, wire_diameter_mm, thickness_mm, finishing,
+        # weight_kg, loose_fg_stock, scrap_percentage, strips_required, total_pieces_from_strips,
+        # excess_pieces, rm_pending_from_po, pending_po_quantity_kg, actual_end_date, customer (full object),
+        # special_instructions, submitted_at, gm_approved_at, gm_approved_by, rm_allocated_at, rm_allocated_by,
+        # updated_at, status_history, transaction_history, rm_returns, additional_rm_approved_kg,
+        # last_additional_rm_approval_at, additional_rm_added_by_ph_strips, last_additional_rm_added_by_ph_at,
+        # additional_rm_added_by_ph_user, created_by (full object)
         fields = [
-            'id', 'mo_id', 'date_time', 'product_code', 'product_code_id', 'quantity',
-            'product_type', 'material_name', 'material_type', 'grade', 'wire_diameter_mm',
-            'thickness_mm', 'finishing', 'manufacturer_brand', 'weight_kg',
-            'loose_fg_stock', 'rm_required_kg', 'tolerance_percentage', 'scrap_percentage', 
-            'rm_released_kg', 'strips_required', 'total_pieces_from_strips', 'excess_pieces',
-            'rm_pending_from_po', 'pending_po_quantity_kg', 'shift', 'shift_display', 
-            'planned_start_date', 'planned_end_date',
-            'actual_start_date', 'actual_end_date', 'status', 'status_display',
-            'priority', 'priority_display', 'customer', 'customer_id', 'customer_name', 
-            'delivery_date', 'special_instructions', 'submitted_at', 'gm_approved_at', 
-            'gm_approved_by', 'rm_allocated_at', 'rm_allocated_by', 'created_at', 
-            'created_by', 'updated_at', 'status_history', 'transaction_history', 'rm_returns',
-            'related_purchase_orders', 'additional_rm_approved_kg', 'last_additional_rm_approval_at',
-            'additional_rm_added_by_ph_kg', 'additional_rm_added_by_ph_strips', 
-            'last_additional_rm_added_by_ph_at', 'additional_rm_added_by_ph_user'
+            'id', 'mo_id', 'product_code', 'product_code_id', 'product_code_display', 'product_code_value',
+            'quantity', 'material_code', 'material_name', 'material_type', 'grade', 'manufacturer_brand',
+            'rm_required_kg', 'tolerance_percentage', 'rm_released_kg', 'shift', 'shift_display',
+            'planned_start_date', 'planned_end_date', 'actual_start_date', 'status', 'status_display',
+            'priority', 'priority_display', 'customer_id', 'customer_name', 'delivery_date',
+            'created_at', 'related_purchase_orders', 'additional_rm_added_by_ph_kg', 'rejection_reason'
         ]
         read_only_fields = [
-            'mo_id', 'date_time', 'product_type', 'material_name', 'material_type',
-            'grade', 'wire_diameter_mm', 'thickness_mm', 'finishing', 'manufacturer_brand',
-            'weight_kg', 'submitted_at', 'gm_approved_at', 'gm_approved_by',
-            'rm_allocated_at', 'rm_allocated_by', 'created_at', 'updated_at'
+            'mo_id', 'material_name', 'material_type', 'grade', 'manufacturer_brand', 'created_at'
         ]
 
     def create(self, validated_data):
@@ -588,22 +562,6 @@ class ManufacturingOrderDetailSerializer(serializers.ModelSerializer):
                 logger.warning(f"Failed to create status change transaction history: {str(e)}")
         
         return instance
-    
-    def get_rm_returns(self, obj):
-        """Get all RM returns for this MO"""
-        from inventory.serializers import RMReturnSerializer
-        from inventory.models import RMReturn
-        
-        # Avoid select_related('heat_number') if grn_receipt_id column doesn't exist in database
-        # heat_number will be loaded lazily when accessed, avoiding the JOIN that requires grn_receipt_id
-        rm_returns = RMReturn.objects.filter(
-            manufacturing_order=obj
-        ).select_related(
-            'raw_material', 'batch', 'returned_from_location',
-            'returned_by', 'disposed_by'
-        ).order_by('-returned_at')
-        
-        return RMReturnSerializer(rm_returns, many=True).data
     
     def get_related_purchase_orders(self, obj):
         """Get all related purchase orders for this MO"""
@@ -1920,19 +1878,18 @@ class RawMaterialAllocationSerializer(serializers.ModelSerializer):
 
 class RawMaterialAllocationMinimalSerializer(serializers.ModelSerializer):
     """Highly optimized minimal serializer for RM allocations in production-head MO detail page"""
+    raw_material_code = serializers.CharField(source='raw_material.material_code', read_only=True)
     raw_material_name = serializers.CharField(source='raw_material.material_name', read_only=True)
-    allocated_by_name = serializers.CharField(source='allocated_by.get_full_name', read_only=True)
-    material_type = serializers.CharField(source='raw_material.material_type', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
 
     class Meta:
         model = RawMaterialAllocation
         # Highly optimized: Only include fields used in production-head MO detail page
-        # REMOVED UNUSED FIELDS: mo, mo_id, mo_priority, mo_status, raw_material, raw_material_code,
-        # raw_material_details, can_be_swapped, swapped_to_mo, swapped_to_mo_id, swapped_at,
-        # swapped_by, swap_reason, locked_at, locked_by, locked_by_name, notes, history
+        # REMOVED UNUSED FIELDS: mo, mo_id, mo_priority, mo_status, raw_material, raw_material_details,
+        # can_be_swapped, swapped_to_mo, swapped_to_mo_id, swapped_at, swapped_by, swap_reason,
+        # locked_at, locked_by, locked_by_name, notes, history, allocated_at, allocated_by_name, material_type
         fields = [
-            'raw_material_name', 'allocated_quantity_kg', 'status',
-            'allocated_at', 'allocated_by_name', 'material_type'
+            'raw_material_code', 'raw_material_name', 'allocated_quantity_kg', 'status', 'status_display'
         ]
 
 

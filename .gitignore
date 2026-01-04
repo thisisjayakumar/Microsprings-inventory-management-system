@@ -4,6 +4,7 @@ env/
 *.pyo
 *.pyd
 __pycache__/
+backups/
 .env
 logs/
 staticfiles/

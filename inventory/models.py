@@ -139,7 +139,7 @@ class InventoryTransaction(models.Model):
     transaction_type = models.CharField(max_length=20, choices=TransactionTypeChoices.choices)
     
     # What
-    product = models.ForeignKey('products.Product', on_delete=models.PROTECT, related_name='inventory_transactions')
+    product = models.ForeignKey('products.Product', on_delete=models.PROTECT, null=True, blank=True, related_name='inventory_transactions', help_text="Product for this transaction (null for raw material transactions)")
     manufacturing_order = models.ForeignKey('manufacturing.ManufacturingOrder', on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_transactions')
     
     # Where
