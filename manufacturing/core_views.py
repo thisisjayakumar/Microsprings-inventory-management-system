@@ -881,6 +881,12 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Ensure RM requirements are calculated before approval
+        if not mo.rm_required_kg or mo.rm_required_kg == 0:
+            logger.warning(f"[RM_RESERVATION] MO {mo.mo_id} - rm_required_kg not calculated. Calculating now...")
+            mo.calculate_rm_requirements()
+            mo.save()
+        
         # Update status
         old_status = mo.status
         mo.status = 'mo_approved'
@@ -896,10 +902,12 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
             try:
                 from manufacturing.services.rm_allocation import RMAllocationService
                 from manufacturing.models import RawMaterialAllocation
-                from inventory.models import RMStockBalance
+                from inventory.models import RMStockBalance, RMStockBalanceHeat
                 
                 # Check if RM allocations already exist
                 existing_allocations = RawMaterialAllocation.objects.filter(mo=mo, status__in=['reserved', 'locked'])
+                
+                logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Approval check: existing_allocations={existing_allocations.count()}, rm_required_kg={mo.rm_required_kg}, rm_pending_from_po={mo.rm_pending_from_po}, pending_po_quantity_kg={mo.pending_po_quantity_kg}")
                 
                 if not existing_allocations.exists() and mo.rm_required_kg and mo.rm_required_kg > 0:
                     logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Approving MO. Reserving RM...")
@@ -920,10 +928,21 @@ class ManufacturingOrderViewSet(viewsets.ModelViewSet):
                         logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM allocated as RESERVED: {len(reservation_result) if reservation_result else 0}")
                         
                         if reservation_result:
-                            # Decrement RMStockBalance available_quantity for reserved qty
+                            # Decrement stock balance for reserved qty
                             raw_material = mo.product_code.material
                             if raw_material:
                                 total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                                
+                                # Update RMStockBalanceHeat (primary model used for stock checks)
+                                stock_balance_heat, _ = RMStockBalanceHeat.objects.get_or_create(
+                                    raw_material=raw_material,
+                                    defaults={'total_available_quantity_kg': Decimal('0')}
+                                )
+                                stock_balance_heat.total_available_quantity_kg -= Decimal(str(total_reserved_kg))
+                                stock_balance_heat.save()
+                                logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Deducted {total_reserved_kg}kg from RMStockBalanceHeat for material {raw_material.material_code}")
+                                
+                                # Also update legacy RMStockBalance for backward compatibility
                                 stock_balance, _ = RMStockBalance.objects.get_or_create(
                                     raw_material=raw_material,
                                     defaults={'available_quantity': Decimal('0')}
@@ -2408,7 +2427,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                 try:
                     from manufacturing.services.rm_allocation import RMAllocationService
                     from manufacturing.models import RawMaterialAllocation
-                    from inventory.models import RMStockBalance
+                    from inventory.models import RMStockBalance, RMStockBalanceHeat
                     
                     # Check current allocations
                     existing_allocations = RawMaterialAllocation.objects.filter(
@@ -2427,9 +2446,20 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
                         
                         if reservation_result:
                             total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
-                            # Decrement RMStockBalance available_quantity for newly reserved qty
+                            # Decrement stock balance for newly reserved qty
                             if mo.product_code and mo.product_code.material:
                                 raw_material = mo.product_code.material
+                                
+                                # Update RMStockBalanceHeat (primary model used for stock checks)
+                                stock_balance_heat, _ = RMStockBalanceHeat.objects.get_or_create(
+                                    raw_material=raw_material,
+                                    defaults={'total_available_quantity_kg': Decimal('0')}
+                                )
+                                stock_balance_heat.total_available_quantity_kg -= Decimal(str(total_reserved_kg))
+                                stock_balance_heat.save()
+                                logger.info(f"[PO_COMPLETED] MO {mo.mo_id} - Allocated {total_reserved_kg}kg from PO {po.po_id} and deducted from RMStockBalanceHeat")
+                                
+                                # Also update legacy RMStockBalance for backward compatibility
                                 stock_balance, _ = RMStockBalance.objects.get_or_create(
                                     raw_material=raw_material,
                                     defaults={'available_quantity': Decimal('0')}

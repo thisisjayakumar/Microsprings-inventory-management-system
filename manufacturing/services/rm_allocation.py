@@ -92,13 +92,20 @@ class RMAllocationService:
                 required_quantity_kg = available_qty  # Allocate what's available
                 logger.warning(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - Partial allocation: Desired {desired_quantity_kg}kg but only {available_qty}kg available. Allocating available stock. Rest ({desired_quantity_kg - available_qty}kg) will come from PO.")
             elif available_qty < desired_quantity_kg:
-                # No pending PO but insufficient stock - this is an error
-                logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - INSUFFICIENT STOCK. Required: {desired_quantity_kg}kg, Available: {available_qty}kg")
-                raise ValidationError(
-                    f"Insufficient stock for {raw_material.material_code}. "
-                    f"Required: {desired_quantity_kg}kg, "
-                    f"Available: {available_qty}kg"
-                )
+                # Insufficient stock - for partial MOs, allocate what's available
+                # This allows partial MOs to reserve available stock even if full quantity isn't available
+                if available_qty > 0:
+                    # Reserve what's available (partial allocation)
+                    required_quantity_kg = available_qty
+                    logger.warning(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - INSUFFICIENT STOCK but allowing partial allocation. Desired: {desired_quantity_kg}kg, Available: {available_qty}kg. Reserving available stock. Shortage: {desired_quantity_kg - available_qty}kg")
+                else:
+                    # No stock available at all - this is an error
+                    logger.error(f"[DEBUG] allocate_rm_for_mo - MO {mo.mo_id} - NO STOCK AVAILABLE. Required: {desired_quantity_kg}kg, Available: {available_qty}kg")
+                    raise ValidationError(
+                        f"No stock available for {raw_material.material_code}. "
+                        f"Required: {desired_quantity_kg}kg, "
+                        f"Available: {available_qty}kg"
+                    )
             else:
                 # Sufficient stock available
                 required_quantity_kg = desired_quantity_kg
@@ -140,6 +147,10 @@ class RMAllocationService:
             notes = f"Initial allocation for MO {mo.mo_id}"
             if mo.rm_pending_from_po and mo.pending_po_quantity_kg and required_quantity_kg < desired_quantity_kg:
                 notes = f"Partial allocation for MO {mo.mo_id}: {required_quantity_kg}kg reserved from stock, {mo.pending_po_quantity_kg}kg pending from PO"
+            elif required_quantity_kg < desired_quantity_kg:
+                # Partial allocation due to insufficient stock
+                shortage_kg = desired_quantity_kg - required_quantity_kg
+                notes = f"Partial allocation for MO {mo.mo_id}: {required_quantity_kg}kg reserved from available stock, {shortage_kg}kg shortage (insufficient stock)"
             
             allocation = RawMaterialAllocation.objects.create(
                 mo=mo,

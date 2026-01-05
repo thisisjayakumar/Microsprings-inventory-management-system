@@ -58,24 +58,45 @@ class ManufacturingWorkflowService:
         """
         from manufacturing.services.rm_allocation import RMAllocationService
         from manufacturing.models import RawMaterialAllocation
-        from inventory.models import RMStockBalance
+        from inventory.models import RMStockBalance, RMStockBalanceHeat
         
         logger = logging.getLogger(__name__)
         
         with transaction.atomic():
             try:
                 mo = ManufacturingOrder.objects.get(id=mo_id)
-                workflow = mo.approval_workflow
                 
-                if workflow.status != 'pending_manager_approval':
-                    raise ValidationError("MO is not pending manager approval")
+                # Ensure RM requirements are calculated before approval
+                if not mo.rm_required_kg or mo.rm_required_kg == 0:
+                    logger.warning(f"[RM_RESERVATION] MO {mo.mo_id} - rm_required_kg not calculated. Calculating now...")
+                    mo.calculate_rm_requirements()
+                    mo.save()
                 
-                # Update workflow
-                workflow.status = 'manager_approved'
-                workflow.manager_approved_at = timezone.now()
-                workflow.manager_approved_by = manager_user
-                workflow.manager_approval_notes = approval_notes
-                workflow.save()
+                # Try to get workflow, but don't fail if it doesn't exist
+                try:
+                    workflow = mo.approval_workflow
+                    if workflow.status != 'pending_manager_approval':
+                        logger.warning(f"[RM_RESERVATION] MO {mo.mo_id} - Workflow status is {workflow.status}, not pending_manager_approval. Continuing anyway.")
+                    
+                    # Update workflow
+                    workflow.status = 'manager_approved'
+                    workflow.manager_approved_at = timezone.now()
+                    workflow.manager_approved_by = manager_user
+                    workflow.manager_approval_notes = approval_notes
+                    workflow.save()
+                except AttributeError:
+                    # Workflow doesn't exist - create it or continue without it
+                    logger.warning(f"[RM_RESERVATION] MO {mo.mo_id} - No approval workflow found. Creating one...")
+                    from manufacturing.models import MOApprovalWorkflow
+                    workflow, _ = MOApprovalWorkflow.objects.get_or_create(
+                        mo=mo,
+                        defaults={
+                            'status': 'manager_approved',
+                            'manager_approved_at': timezone.now(),
+                            'manager_approved_by': manager_user,
+                            'manager_approval_notes': approval_notes
+                        }
+                    )
                 
                 # Update MO status
                 mo.status = 'mo_approved'
@@ -87,6 +108,8 @@ class ManufacturingWorkflowService:
                 try:
                     # Check if RM allocations already exist
                     existing_allocations = RawMaterialAllocation.objects.filter(mo=mo, status__in=['reserved', 'locked'])
+                    
+                    logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Workflow approval check: existing_allocations={existing_allocations.count()}, rm_required_kg={mo.rm_required_kg}, rm_pending_from_po={mo.rm_pending_from_po}, pending_po_quantity_kg={mo.pending_po_quantity_kg}")
                     
                     if not existing_allocations.exists() and mo.rm_required_kg and mo.rm_required_kg > 0:
                         logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Approving MO via workflow. Reserving RM...")
@@ -107,10 +130,21 @@ class ManufacturingWorkflowService:
                             logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - RM allocated as RESERVED: {len(reservation_result) if reservation_result else 0}")
                             
                             if reservation_result:
-                                # Decrement RMStockBalance available_quantity for reserved qty
+                                # Decrement stock balance for reserved qty
                                 raw_material = mo.product_code.material
                                 if raw_material:
                                     total_reserved_kg = sum(a.allocated_quantity_kg for a in reservation_result)
+                                    
+                                    # Update RMStockBalanceHeat (primary model used for stock checks)
+                                    stock_balance_heat, _ = RMStockBalanceHeat.objects.get_or_create(
+                                        raw_material=raw_material,
+                                        defaults={'total_available_quantity_kg': Decimal('0')}
+                                    )
+                                    stock_balance_heat.total_available_quantity_kg -= Decimal(str(total_reserved_kg))
+                                    stock_balance_heat.save()
+                                    logger.info(f"[RM_RESERVATION] MO {mo.mo_id} - Deducted {total_reserved_kg}kg from RMStockBalanceHeat for material {raw_material.material_code}")
+                                    
+                                    # Also update legacy RMStockBalance for backward compatibility
                                     stock_balance, _ = RMStockBalance.objects.get_or_create(
                                         raw_material=raw_material,
                                         defaults={'available_quantity': Decimal('0')}

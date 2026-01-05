@@ -621,7 +621,27 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                                 elif completion_record and completion_record.parent_completion:
                                     defect_description = completion_record.parent_completion.defect_description or ""
                                 
-                                # Create rework batch for the next process
+                                # Create a new Batch object for this rework cycle with rework cycle suffix in batch_id
+                                rework_batch_obj = Batch(
+                                    mo=batch.mo,
+                                    product_code=batch.product_code,
+                                    planned_quantity=int(ok_quantity_kg * 1000),  # Convert kg to grams
+                                    assigned_supervisor=rework_supervisor,
+                                    status='created',
+                                    notes=f"Rework cycle {rework_cycle} from {current_process_execution.process.name}"
+                                )
+                                # Set rework cycle info for batch_id generation
+                                rework_batch_obj._rework_cycle_number = rework_cycle
+                                rework_batch_obj._original_batch_id = batch.batch_id
+                                rework_batch_obj.save()
+                                
+                                logger.info(f"✅ Rework Batch created: {rework_batch_obj.batch_id} for cycle R{rework_cycle}")
+                                
+                                # Update receipt log to use the new rework batch
+                                receipt_log.batch = rework_batch_obj
+                                receipt_log.save()
+                                
+                                # Create rework batch tracking object
                                 rework_batch = ReworkBatch.objects.create(
                                     original_batch=batch,
                                     process_execution=next_process,
@@ -634,7 +654,7 @@ class BatchProcessCompletionViewSet(viewsets.ModelViewSet):
                                     defect_description=defect_description or f"Rework cycle {rework_cycle} from {current_process_execution.process.name}"
                                 )
                                 
-                                logger.info(f"✅ ReworkBatch created: ID={rework_batch.id}, batch={batch.batch_id}, process={next_process.process.name}, cycle={rework_cycle}, quantity={ok_quantity_kg} kg")
+                                logger.info(f"✅ ReworkBatch created: ID={rework_batch.id}, batch={rework_batch_obj.batch_id}, process={next_process.process.name}, cycle={rework_cycle}, quantity={ok_quantity_kg} kg")
                             else:
                                 # ReworkBatch already exists - don't create duplicate
                                 # Log a warning if it's a different status (might indicate an issue)
@@ -751,19 +771,87 @@ class ReworkBatchViewSet(viewsets.ModelViewSet):
                     rework_kg=Decimal(str(rework_kg))
                 )
                 
-                # Move OK to next process as NORMAL batch (not rework)
-                # The OK quantity from rework completion should be treated as normal batch for next supervisor
-                # Only the rework_kg stays with current supervisor for another rework cycle
+                # Move OK to next process as a SEPARATE rework batch (not merged with original)
+                # The OK quantity from rework completion should continue as a separate rework batch
+                # This ensures rework batches move independently through the process flow
                 if ok_kg > 0:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    
+                    # Find or create the Batch object for this rework cycle
+                    # When a rework batch is first created, it stays with the current supervisor
+                    # When completing, we need a separate Batch object to move to the next process
+                    from manufacturing.models.batch_verification import BatchReceiptLog
+                    from manufacturing.models.batch import Batch
+                    
+                    # Try to find the rework batch's Batch object by looking at receipt logs
+                    # Look for receipt logs where this rework batch was received at the current process
+                    receipt_log = BatchReceiptLog.objects.filter(
+                        mo=rework_batch.original_batch.mo,
+                        to_process=rework_batch.process_execution.process,
+                        is_rework_batch=True,
+                        rework_cycle_number=rework_batch.rework_cycle_number
+                    ).order_by('-handed_over_at').first()
+                    
+                    # Use the batch from receipt log if found
+                    rework_batch_obj = None
+                    if receipt_log:
+                        rework_batch_obj = receipt_log.batch
+                        logger.info(f"✅ Found existing rework Batch: {rework_batch_obj.batch_id} for cycle R{rework_batch.rework_cycle_number}")
+                    
+                    # If not found, try to find by batch_id pattern
+                    if not rework_batch_obj:
+                        # Format: BATCH-MO-YYYYMMDD-XXXX-XXX-RN
+                        expected_suffix = f"-R{rework_batch.rework_cycle_number}"
+                        rework_batch_obj = Batch.objects.filter(
+                            mo=rework_batch.original_batch.mo,
+                            batch_id__endswith=expected_suffix
+                        ).order_by('-created_at').first()
+                        
+                        if rework_batch_obj:
+                            logger.info(f"✅ Found rework Batch by ID pattern: {rework_batch_obj.batch_id} for cycle R{rework_batch.rework_cycle_number}")
+                    
+                    # If still not found, create a new batch for this rework cycle
+                    # This happens when a rework batch is completed for the first time
+                    if not rework_batch_obj:
+                        logger.info(
+                            f"📦 Creating new rework Batch for rework_batch={rework_batch.id}, "
+                            f"cycle={rework_batch.rework_cycle_number}, quantity={ok_kg} kg"
+                        )
+                        
+                        # Get the next process to determine the supervisor
+                        next_process = rework_batch.process_execution.get_next_process_execution()
+                        assigned_supervisor = None
+                        if next_process and next_process.assigned_supervisor:
+                            assigned_supervisor = next_process.assigned_supervisor
+                        else:
+                            assigned_supervisor = rework_batch.assigned_supervisor
+                        
+                        # Create a new Batch object for this rework cycle
+                        rework_batch_obj = Batch(
+                            mo=rework_batch.original_batch.mo,
+                            product_code=rework_batch.original_batch.product_code,
+                            planned_quantity=int(ok_kg * 1000),  # Convert kg to grams
+                            assigned_supervisor=assigned_supervisor,
+                            status='created',
+                            notes=f"Rework cycle {rework_batch.rework_cycle_number} from {rework_batch.process_execution.process.name}"
+                        )
+                        # Set rework cycle info for batch_id generation
+                        rework_batch_obj._rework_cycle_number = rework_batch.rework_cycle_number
+                        rework_batch_obj._original_batch_id = rework_batch.original_batch.batch_id
+                        rework_batch_obj.save()
+                        
+                        logger.info(f"✅ Created new rework Batch: {rework_batch_obj.batch_id} for cycle R{rework_batch.rework_cycle_number}")
+                    
                     # Use the BatchProcessCompletionViewSet's _move_to_next_process method
                     # Create an instance to access the method
                     completion_viewset = BatchProcessCompletionViewSet()
                     completion_viewset._move_to_next_process(
-                        batch=rework_batch.original_batch,
+                        batch=rework_batch_obj,  # Use the separate rework batch, not original batch
                         current_process_execution=rework_batch.process_execution,
                         ok_quantity_kg=ok_kg,
-                        is_rework=False,  # OK quantity goes as normal batch, not rework
-                        rework_cycle=0,  # Reset cycle for normal batch
+                        is_rework=True,  # Keep as rework batch to maintain separate flow
+                        rework_cycle=rework_batch.rework_cycle_number,  # Keep the rework cycle number
                         completion_record=completion
                     )
                 

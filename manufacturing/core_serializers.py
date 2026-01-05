@@ -728,11 +728,12 @@ class MOProcessExecutionListSerializer(serializers.ModelSerializer):
     step_count = serializers.SerializerMethodField()
     completed_steps = serializers.SerializerMethodField()
     batch_counts = serializers.SerializerMethodField()
+    mo_id = serializers.CharField(source='mo.mo_id', read_only=True)
     
     class Meta:
         model = MOProcessExecution
         fields = [
-            'id', 'process', 'process_name', 'process_code', 'status', 
+            'id', 'mo', 'mo_id', 'process', 'process_name', 'process_code', 'status', 
             'status_display', 'sequence_order', 'planned_start_time', 
             'planned_end_time', 'actual_start_time', 'actual_end_time',
             'assigned_operator', 'assigned_operator_name', 'assigned_supervisor', 'assigned_supervisor_name',

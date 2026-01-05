@@ -17,7 +17,8 @@ class Batch(models.Model):
     Key Concept: 1 MO can have multiple Batches until total batch quantities fulfill MO target quantity
     """
     # Auto-generated unique identifier
-    batch_id = models.CharField(max_length=30, unique=True, editable=False)
+    # Format: BATCH-MO-YYYYMMDD-XXXX-XXX or BATCH-MO-YYYYMMDD-XXXX-XXX-RN for rework
+    batch_id = models.CharField(max_length=35, unique=True, editable=False)
     
     # Relationships
     mo = models.ForeignKey(
@@ -123,9 +124,36 @@ class Batch(models.Model):
     
     def save(self, *args, **kwargs):
         if not self.batch_id:
-            existing_batches = Batch.objects.filter(mo=self.mo).count()
-            sequence = existing_batches + 1
-            self.batch_id = f"BATCH-{self.mo.mo_id}-{sequence:03d}"
+            # Check if this is a rework batch (has rework_cycle_number in kwargs or as attribute)
+            rework_cycle = kwargs.pop('rework_cycle_number', None) or getattr(self, '_rework_cycle_number', None)
+            
+            if rework_cycle and rework_cycle > 0:
+                # For rework batches, use the original batch ID with rework cycle suffix
+                original_batch_id = kwargs.pop('original_batch_id', None) or getattr(self, '_original_batch_id', None)
+                if original_batch_id:
+                    # Extract the base batch ID (e.g., "BATCH-MO-20260105-0005-001")
+                    # and append rework cycle (e.g., "-R1")
+                    proposed_batch_id = f"{original_batch_id}-R{rework_cycle}"
+                    
+                    # Check if this batch_id already exists (shouldn't happen, but be safe)
+                    if Batch.objects.filter(batch_id=proposed_batch_id).exists():
+                        # If it exists, append a counter
+                        counter = 1
+                        while Batch.objects.filter(batch_id=f"{proposed_batch_id}-{counter}").exists():
+                            counter += 1
+                        self.batch_id = f"{proposed_batch_id}-{counter}"
+                    else:
+                        self.batch_id = proposed_batch_id
+                else:
+                    # Fallback: generate based on MO
+                    existing_batches = Batch.objects.filter(mo=self.mo).count()
+                    sequence = existing_batches + 1
+                    self.batch_id = f"BATCH-{self.mo.mo_id}-{sequence:03d}-R{rework_cycle}"
+            else:
+                # Regular batch creation
+                existing_batches = Batch.objects.filter(mo=self.mo).count()
+                sequence = existing_batches + 1
+                self.batch_id = f"BATCH-{self.mo.mo_id}-{sequence:03d}"
         
         # Validate product_code matches MO product
         if self.mo and self.product_code:

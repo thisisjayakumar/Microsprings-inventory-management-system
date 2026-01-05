@@ -174,6 +174,7 @@ class BatchProcessCompletionSerializer(serializers.ModelSerializer):
     """Serializer for batch process completion with quantities"""
     completed_by_name = serializers.CharField(source='completed_by.get_full_name', read_only=True)
     batch_id = serializers.CharField(source='batch.batch_id', read_only=True)
+    mo_id = serializers.CharField(source='batch.mo.mo_id', read_only=True)
     process_name = serializers.CharField(source='process_execution.process.name', read_only=True)
     ok_percentage = serializers.FloatField(read_only=True)
     scrap_percentage = serializers.FloatField(read_only=True)
@@ -223,7 +224,7 @@ class BatchProcessCompletionSerializer(serializers.ModelSerializer):
     class Meta:
         model = BatchProcessCompletion
         fields = [
-            'id', 'batch', 'batch_id', 'process_execution', 'process_name',
+            'id', 'batch', 'batch_id', 'mo_id', 'process_execution', 'process_name',
             'completed_by', 'completed_by_name', 'completed_at',
             'input_quantity_kg', 'ok_quantity_kg', 'scrap_quantity_kg',
             'rework_quantity_kg', 'is_rework_cycle', 'rework_cycle_number',
