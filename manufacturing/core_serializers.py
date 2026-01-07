@@ -70,12 +70,46 @@ class RawMaterialBasicSerializer(serializers.ModelSerializer):
         read_only_fields = fields
     
     def get_available_quantity(self, obj):
-        """Get available quantity from RMStockBalance"""
+        """Get available quantity (usable quantity = total - reserved)
+        
+        Uses RMStockBalanceHeat (heat-tracked, more accurate) if available,
+        falls back to RMStockBalance (legacy) if not.
+        Also accounts for reserved quantities from RawMaterialAllocation.
+        """
         try:
-            from inventory.models import RMStockBalance
-            stock_balance = RMStockBalance.objects.get(raw_material=obj)
-            return float(stock_balance.available_quantity)
-        except RMStockBalance.DoesNotExist:
+            from inventory.models import RMStockBalanceHeat, RMStockBalance
+            from manufacturing.models import RawMaterialAllocation
+            from django.db.models import Sum
+            from decimal import Decimal
+            
+            # First try RMStockBalanceHeat (heat-tracked, more accurate)
+            stock_balance_heat = RMStockBalanceHeat.objects.filter(raw_material=obj).first()
+            if stock_balance_heat:
+                total_available = stock_balance_heat.total_available_quantity_kg or Decimal('0')
+            else:
+                # Fallback to RMStockBalance (legacy)
+                try:
+                    stock_balance = RMStockBalance.objects.get(raw_material=obj)
+                    total_available = stock_balance.available_quantity or Decimal('0')
+                except RMStockBalance.DoesNotExist:
+                    return 0.0
+            
+            # Calculate reserved quantity (reserved + locked allocations)
+            total_reserved = RawMaterialAllocation.objects.filter(
+                raw_material=obj,
+                status__in=['reserved', 'locked']
+            ).aggregate(
+                total=Sum('allocated_quantity_kg')
+            )['total'] or Decimal('0')
+            
+            # Available quantity = Total - Reserved
+            available = total_available - total_reserved
+            return max(0.0, float(available))  # Ensure non-negative
+            
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error calculating available_quantity for raw material {obj.id}: {str(e)}")
             return 0.0
 
 
@@ -228,8 +262,22 @@ class ManufacturingOrderListSerializer(serializers.ModelSerializer):
     material_type = serializers.SerializerMethodField()
     rm_unit = serializers.SerializerMethodField()
     can_create_batch = serializers.ReadOnlyField()
-    batches = BatchMinimalSerializer(many=True, read_only=True)
+    batches = serializers.SerializerMethodField()
     strips_required = serializers.IntegerField(read_only=True)
+    
+    def get_batches(self, obj):
+        """Get batches excluding rework batches - rework batches should only appear via rework batch API"""
+        import re
+        # Filter out ALL rework batches from the regular batch list
+        # Rework batches should only be visible through the rework batch API endpoint
+        # This ensures rework batches don't appear in supervisor dashboards or RM store lists
+        # Rework batches are tracked separately via ReworkBatch model and shown through dedicated endpoints
+        non_rework_batches = [
+            batch for batch in obj.batches.all()
+            if not getattr(batch, 'is_rework_batch', False) and 
+               not (batch.batch_id and re.search(r'-R\d+', batch.batch_id))
+        ]
+        return BatchMinimalSerializer(non_rework_batches, many=True).data
     
     def get_product_code_display(self, obj):
         """Get product display name"""

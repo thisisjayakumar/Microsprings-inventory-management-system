@@ -107,6 +107,12 @@ class Batch(models.Model):
         help_text="True if any coil in this batch was returned as quality defect. This batch will be excluded from RM calculations."
     )
     
+    # Rework batch tracking
+    is_rework_batch = models.BooleanField(
+        default=False,
+        help_text="True if this is a rework batch created from a rework cycle. Rework batches don't require RM allocation and should only be visible to supervisors."
+    )
+    
     # Audit fields
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_batches')
@@ -120,6 +126,7 @@ class Batch(models.Model):
             models.Index(fields=['mo', 'status']),
             models.Index(fields=['product_code', 'status']),
             models.Index(fields=['batch_id']),
+            models.Index(fields=['is_rework_batch', 'status']),
         ]
     
     def save(self, *args, **kwargs):
@@ -128,12 +135,20 @@ class Batch(models.Model):
             rework_cycle = kwargs.pop('rework_cycle_number', None) or getattr(self, '_rework_cycle_number', None)
             
             if rework_cycle and rework_cycle > 0:
+                # Mark as rework batch
+                self.is_rework_batch = True
+                
                 # For rework batches, use the original batch ID with rework cycle suffix
                 original_batch_id = kwargs.pop('original_batch_id', None) or getattr(self, '_original_batch_id', None)
                 if original_batch_id:
-                    # Extract the base batch ID (e.g., "BATCH-MO-20260105-0005-001")
-                    # and append rework cycle (e.g., "-R1")
-                    proposed_batch_id = f"{original_batch_id}-R{rework_cycle}"
+                    # IMPORTANT: Extract base batch ID by removing any existing R suffix
+                    # This prevents double R1-R1 issue when creating rework from a rework batch
+                    import re
+                    # Remove any existing -R{N} suffix from original_batch_id
+                    base_batch_id = re.sub(r'-R\d+$', '', original_batch_id)
+                    
+                    # Append rework cycle (e.g., "-R1")
+                    proposed_batch_id = f"{base_batch_id}-R{rework_cycle}"
                     
                     # Check if this batch_id already exists (shouldn't happen, but be safe)
                     if Batch.objects.filter(batch_id=proposed_batch_id).exists():
@@ -150,7 +165,9 @@ class Batch(models.Model):
                     sequence = existing_batches + 1
                     self.batch_id = f"BATCH-{self.mo.mo_id}-{sequence:03d}-R{rework_cycle}"
             else:
-                # Regular batch creation
+                # Regular batch creation - ensure is_rework_batch is False
+                if not hasattr(self, 'is_rework_batch') or self.is_rework_batch is None:
+                    self.is_rework_batch = False
                 existing_batches = Batch.objects.filter(mo=self.mo).count()
                 sequence = existing_batches + 1
                 self.batch_id = f"BATCH-{self.mo.mo_id}-{sequence:03d}"

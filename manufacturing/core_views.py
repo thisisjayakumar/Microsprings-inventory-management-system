@@ -3213,6 +3213,16 @@ class BatchViewSet(viewsets.ModelViewSet):
         if mo_id:
             queryset = queryset.filter(mo_id=mo_id)
         
+        # For RM Store users, exclude rework batches (they don't need to see rework batches)
+        # Rework batches are only visible to supervisors in their workflow
+        user = self.request.user
+        if user and user.is_authenticated:
+            user_roles = user.user_roles.filter(is_active=True).values_list('role__name', flat=True)
+            # RM Store, FG Store, and other non-supervisor roles should not see rework batches
+            # Only supervisors, admin, manager, production_head should see rework batches
+            if not any(role in ['supervisor', 'admin', 'manager', 'production_head'] for role in user_roles):
+                queryset = queryset.exclude(is_rework_batch=True)
+        
         return queryset
 
     def get_serializer_class(self):
@@ -3336,7 +3346,9 @@ class BatchViewSet(viewsets.ModelViewSet):
             rm_unit = 'strips'
         
         # Get all batches for this MO
-        batches = Batch.objects.filter(mo=mo).exclude(status='cancelled')
+        # EXCLUDE rework batches - they don't require RM allocation and shouldn't appear in RM Store views
+        # Rework batches are only for supervisor workflow tracking
+        batches = Batch.objects.filter(mo=mo).exclude(status='cancelled').exclude(is_rework_batch=True)
         
         # DEBUG: Log batch query for MO batch summary
         logger.info(f"[DEBUG] MO Batch Summary - MO ID: {mo_id}, MO Identifier: {mo.mo_id}, Batches found: {batches.count()}")
