@@ -45,7 +45,7 @@
 - Produces: `IsolatedMySQLTestRunner` usable with SQLite; it delegates to `DiscoverRunner` when the engine is not MySQL.
 - Produces: `ruff` configuration with `E`, `F`, `I`; `E501` and `F541` ignored initially (documented ratchet).
 
-- [ ] **Step 1: Write the failing test for the runner fallback**
+- [x] **Step 1: Write the failing test for the runner fallback**
 
 Create `microsprings_inventory_system/tests/__init__.py` and `microsprings_inventory_system/tests/test_runner_fallback.py`:
 
@@ -72,13 +72,13 @@ class RunnerFallbackTests(SimpleTestCase):
         self.assertIsNone(runner.test_database_name)
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `python manage.py test microsprings_inventory_system.tests.test_runner_fallback --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: FAIL because `test_settings` does not exist yet (or the runner raises when it tries to build a MySQL name).
 
-- [ ] **Step 3: Create `test_settings.py`**
+- [x] **Step 3: Create `test_settings.py`**
 
 ```python
 """Fast, dependency-free test settings (SQLite, locmem cache)."""
@@ -106,7 +106,7 @@ PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
 ```
 
-- [ ] **Step 4: Add the non-MySQL fallback to the runner**
+- [x] **Step 4: Add the non-MySQL fallback to the runner**
 
 At the start of `setup_databases` in `microsprings_inventory_system/test_runner.py`:
 
@@ -122,13 +122,13 @@ At the start of `teardown_databases`:
             return super().teardown_databases(old_config, **kwargs)
 ```
 
-- [ ] **Step 5: Run the fallback test**
+- [x] **Step 5: Run the fallback test**
 
 Run: `python manage.py test microsprings_inventory_system.tests.test_runner_fallback --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: PASS (1 test).
 
-- [ ] **Step 6: Add `requirements-dev.txt`**
+- [x] **Step 6: Add `requirements-dev.txt`**
 
 ```
 pytest==8.3.4
@@ -138,7 +138,7 @@ ruff==0.8.4
 drf-spectacular==0.28.0
 ```
 
-- [ ] **Step 7: Add `pyproject.toml`**
+- [x] **Step 7: Add `pyproject.toml`**
 
 ```toml
 [tool.ruff]
@@ -159,7 +159,7 @@ DJANGO_SETTINGS_MODULE = "microsprings_inventory_system.test_settings"
 python_files = ["test_*.py"]
 ```
 
-- [ ] **Step 8: Add the CI workflow**
+- [x] **Step 8: Add the CI workflow**
 
 Create `.github/workflows/backend.yml`:
 
@@ -198,7 +198,7 @@ jobs:
           if [ -n "$FILES" ]; then ruff check $FILES; fi
 ```
 
-- [ ] **Step 9: Verify the harness and tooling**
+- [x] **Step 9: Verify the harness and tooling**
 
 Run:
 
@@ -211,7 +211,7 @@ ruff check microsprings_inventory_system/test_settings.py microsprings_inventory
 
 Expected: checks pass; the full suite runs (known failures are fixed in Task 2, so this run may still show them); ruff passes on the new files.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add microsprings_inventory_system/test_settings.py microsprings_inventory_system/test_runner.py microsprings_inventory_system/tests requirements-dev.txt pyproject.toml .github/workflows/backend.yml
@@ -232,7 +232,7 @@ git commit -m "test: add fast SQLite harness and backend CI"
 - Produces: `processes` URL namespace (`reverse('processes:process-list')`).
 - Produces: `DispatchTransaction.confirm_dispatch()` persists `DispatchBatch.quantity_dispatched`.
 
-- [ ] **Step 1: Write failing assertions for the dispatch persistence bug**
+- [x] **Step 1: Write failing assertions for the dispatch persistence bug**
 
 The existing `fg_store.tests.DispatchTransactionModelTest.test_confirm_dispatch` already asserts:
 
@@ -247,7 +247,7 @@ Run: `python manage.py test fg_store.tests.DispatchTransactionModelTest.test_con
 
 Expected: FAIL with `0 != 500`.
 
-- [ ] **Step 2: Fix `confirm_dispatch`**
+- [x] **Step 2: Fix `confirm_dispatch`**
 
 In `fg_store/models.py`, after incrementing `quantity_dispatched`, save that field before `update_status()`:
 
@@ -257,17 +257,17 @@ In `fg_store/models.py`, after incrementing `quantity_dispatched`, save that fie
         self.dispatch_batch.update_status()
 ```
 
-- [ ] **Step 3: Run the dispatch test**
+- [x] **Step 3: Run the dispatch test**
 
 Run: `python manage.py test fg_store.tests.DispatchTransactionModelTest.test_confirm_dispatch --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: PASS.
 
-- [ ] **Step 4: Fix the outsourcing `create_user` calls**
+- [x] **Step 4: Fix the outsourcing `create_user` calls**
 
 In `manufacturing/tests/test_outsourcing.py`, both `setUp` methods create a user without `username`. Add `username='test@example.com'` to each `User.objects.create_user(...)` call.
 
-- [ ] **Step 5: Add the processes URL namespace**
+- [x] **Step 5: Add the processes URL namespace**
 
 At the top of `processes/urls.py`, add:
 
@@ -275,7 +275,7 @@ At the top of `processes/urls.py`, add:
 app_name = 'processes'
 ```
 
-- [ ] **Step 6: Give the FG API test user the FG Store role**
+- [x] **Step 6: Give the FG API test user the FG Store role**
 
 In `fg_store/tests.py`, import:
 
@@ -297,7 +297,7 @@ In `FGStoreAPITest.setUp`, replace the placeholder comment with:
         )
 ```
 
-- [ ] **Step 7: Run the previously failing groups**
+- [x] **Step 7: Run the previously failing groups**
 
 Run:
 
@@ -307,7 +307,7 @@ python manage.py test manufacturing.tests.test_outsourcing processes.tests fg_st
 
 Expected: PASS (all tests in these groups; the RM reservation test is handled in Task 3).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add manufacturing/tests/test_outsourcing.py processes/urls.py fg_store/tests.py fg_store/models.py
@@ -324,13 +324,13 @@ git commit -m "test: fix user, namespace, role, and dispatch persistence defects
 **Interfaces:**
 - Produces: `test_04_complete_flow` marked `@expectedFailure` until Phase 1 fixes `StockService`.
 
-- [ ] **Step 1: Confirm the bug is still reproduced**
+- [x] **Step 1: Confirm the bug is still reproduced**
 
 Run: `python manage.py test manufacturing.tests.test_rm_reservation_flow.RMRervationFlowTestCase.test_04_complete_flow --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: FAIL with `Decimal('898.000') != Decimal('1000.000')`.
 
-- [ ] **Step 2: Mark the test as an expected failure**
+- [x] **Step 2: Mark the test as an expected failure**
 
 Add `from unittest import expectedFailure` to the imports and decorate `test_04_complete_flow`:
 
@@ -347,13 +347,13 @@ Add this comment directly above the decorator:
     # decorator when the test starts passing.
 ```
 
-- [ ] **Step 3: Run the full suite**
+- [x] **Step 3: Run the full suite**
 
 Run: `python manage.py test --settings=microsprings_inventory_system.test_settings -v 1`
 
 Expected: `OK` (the expected failure counts as success; `expected failures=1`).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add manufacturing/tests/test_rm_reservation_flow.py
@@ -373,7 +373,7 @@ git commit -m "test: mark known heat-balance ledger bug as expected failure"
 - Consumes: `POST /api/inventory/grn-receipts/` and `POST /api/inventory/grn-receipts/{id}/complete_receipt/`.
 - Produces: a regression test for heat and legacy balances, plus an expected-failure test for the legacy double-count at completion.
 
-- [ ] **Step 1: Replace the placeholder with a test package**
+- [x] **Step 1: Replace the placeholder with a test package**
 
 ```bash
 git rm inventory/tests.py
@@ -381,7 +381,7 @@ mkdir -p inventory/tests
 touch inventory/tests/__init__.py
 ```
 
-- [ ] **Step 2: Write the characterization tests**
+- [x] **Step 2: Write the characterization tests**
 
 Create `inventory/tests/test_grn_flow.py`:
 
@@ -490,13 +490,13 @@ class GRNReceiptFlowTests(APITestCase):
         )
 ```
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 Run: `python manage.py test inventory.tests.test_grn_flow --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: 2 tests, `OK` (1 expected failure).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A inventory/tests
@@ -514,7 +514,7 @@ git commit -m "test: characterize GRN receipt stock behavior"
 - Consumes: `POST /api/inventory/rm-returns/` and `POST /api/inventory/rm-returns/{id}/process-disposition/`.
 - Produces: a regression test that `return_to_rm` adds the received kg back to heat and legacy stock and creates a `return` ledger row.
 
-- [ ] **Step 1: Write the characterization test**
+- [x] **Step 1: Write the characterization test**
 
 Create `inventory/tests/test_rm_return_flow.py`:
 
@@ -635,13 +635,13 @@ class RMReturnDispositionFlowTests(APITestCase):
         self.assertEqual(transaction.quantity, Decimal('10.00'))
 ```
 
-- [ ] **Step 2: Run the test**
+- [x] **Step 2: Run the test**
 
 Run: `python manage.py test inventory.tests.test_rm_return_flow --settings=microsprings_inventory_system.test_settings -v 2`
 
 Expected: PASS (1 test).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add inventory/tests/test_rm_return_flow.py
@@ -664,23 +664,23 @@ git commit -m "test: characterize RM return disposition stock behavior"
 - Produces: the ADRs referenced by the design doc and the Phase 1 tests.
 - Produces: Mermaid dependency and domain diagrams.
 
-- [ ] **Step 1: Write ADR 0001 — modular monolith**
+- [x] **Step 1: Write ADR 0001 — modular monolith**
 
 Create `docs/architecture/decisions/0001-modular-monolith.md` with sections: Status (Accepted), Context, Decision, Consequences, Alternatives considered (microservices, integrity-only sprint). State that Django app labels, table names, and URLs are preserved.
 
-- [ ] **Step 2: Write ADR 0002 — stock ledger**
+- [x] **Step 2: Write ADR 0002 — stock ledger**
 
 Create `docs/architecture/decisions/0002-stock-ledger.md`. Record: `HeatNumber` is the authoritative lot record; `RMStockBalanceHeat.total_available_quantity_kg` is net available; reservations are derived from `RawMaterialAllocation` (`reserved` + `locked`); `StockService` is the only writer; ledger granularity is movement × material × heat × location; `quantity > 0` with direction from movement type or `metadata.direction`.
 
-- [ ] **Step 3: Write ADR 0003 — idempotency**
+- [x] **Step 3: Write ADR 0003 — idempotency**
 
 Create `docs/architecture/decisions/0003-idempotency.md`. Record: `operation_key` groups all rows of one business operation; unique `idempotency_key` per row via `make_key(operation_key, material_id, heat_id, location_id)`; replay returns the existing result and does not re-apply stock; partial GRN receipts include the line/heat in the key.
 
-- [ ] **Step 4: Write ADR 0004 — test strategy**
+- [x] **Step 4: Write ADR 0004 — test strategy**
 
 Create `docs/architecture/decisions/0004-test-strategy.md`. Record: SQLite fast profile, MySQL concurrency profile, test pyramid, coverage targets (90% critical services, 60% overall at Phase 1), and the expected-failure policy for known bugs.
 
-- [ ] **Step 5: Write the architecture overview**
+- [x] **Step 5: Write the architecture overview**
 
 Create `docs/architecture/overview.md` with:
 
@@ -689,11 +689,11 @@ Create `docs/architecture/overview.md` with:
 - the request flow for a stock-changing endpoint;
 - links to the ADRs and the design doc.
 
-- [ ] **Step 6: Write the domain map**
+- [x] **Step 6: Write the domain map**
 
 Create `docs/architecture/domain-map.md` with a Mermaid diagram of the domains from design §5.2 (identity, catalog, inventory, procurement, manufacturing, quality, notifications, reporting) and a table mapping each domain to its physical Django apps.
 
-- [ ] **Step 7: Verify links and commit**
+- [x] **Step 7: Verify links and commit**
 
 Run:
 
@@ -719,7 +719,7 @@ git commit -m "docs: add Phase 0 ADRs and architecture diagrams"
 **Files:**
 - Modify: this plan (check the boxes)
 
-- [ ] **Step 1: Run the full verification set**
+- [x] **Step 1: Run the full verification set**
 
 ```bash
 python manage.py check
@@ -736,11 +736,11 @@ Expected:
 - The suite reports `OK` with 2 expected failures.
 - Ruff passes on the added files.
 
-- [ ] **Step 2: Record the baseline**
+- [x] **Step 2: Record the baseline**
 
 Append a short “Phase 0 baseline” section to this plan with the exact test count and the expected-failure names. Do not claim a count you did not observe.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-10-28-phase-0-safety-net.md
