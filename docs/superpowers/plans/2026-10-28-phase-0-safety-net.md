@@ -725,18 +725,20 @@ git commit -m "docs: add Phase 0 ADRs and architecture diagrams"
 python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py test --settings=microsprings_inventory_system.test_settings -v 1
-ruff check $(git diff --name-only HEAD~6 -- '*.py' | grep -v '/migrations/' || true)
+BASE=$(git merge-base origin/main HEAD)
+FILES=$(git diff --name-only --diff-filter=A "$BASE"...HEAD -- '*.py' | grep -v '/migrations/' || true)
+if [ -n "$FILES" ]; then ruff check $FILES; fi
 ```
 
 Expected:
 - `check` reports no issues.
 - `makemigrations --check` reports no changes.
-- The suite reports `OK` with 1 expected failure.
-- Ruff passes on the changed files.
+- The suite reports `OK` with 2 expected failures.
+- Ruff passes on the added files.
 
 - [ ] **Step 2: Record the baseline**
 
-Append a short “Phase 0 baseline” section to this plan with the exact test count and the expected-failure name. Do not claim a count you did not observe.
+Append a short “Phase 0 baseline” section to this plan with the exact test count and the expected-failure names. Do not claim a count you did not observe.
 
 - [ ] **Step 3: Commit**
 
@@ -744,3 +746,51 @@ Append a short “Phase 0 baseline” section to this plan with the exact test c
 git add docs/superpowers/plans/2026-10-28-phase-0-safety-net.md
 git commit -m "docs: record Phase 0 verification baseline"
 ```
+
+---
+
+## Phase 0 baseline (observed 2026-10-28)
+
+Commands and results:
+
+```text
+python manage.py check --settings=microsprings_inventory_system.test_settings
+→ System check identified no issues (0 silenced).
+
+python manage.py makemigrations --check --dry-run --settings=microsprings_inventory_system.test_settings
+→ No changes detected
+
+python manage.py test --settings=microsprings_inventory_system.test_settings -v 1
+→ Ran 50 tests in 2.082s
+→ OK (skipped=5, expected failures=2)
+
+ruff check <added files>
+→ All checks passed!
+```
+
+Expected failures:
+
+1. `manufacturing.tests.test_rm_reservation_flow.RMRervationFlowTestCase.test_04_complete_flow`
+   — heat balance stays at 898 instead of returning to 1000 after MO stop.
+2. `inventory.tests.test_grn_flow.GRNReceiptFlowTests.test_completing_grn_does_not_double_count_legacy_stock`
+   — completing a GRN raises legacy stock from 100 to 200.
+
+Both are scheduled for Phase 1 (`StockService` and the GRN service).
+
+### Execution notes and deviations
+
+- Task 2 also fixed three real defects found while making the tests honest:
+  `OutsourcingRequestDetailSerializer` required read-only `vendor`/`created_by`
+  fields and conflicted with `perform_create`; the outsourcing `send` and
+  `return_items` actions referenced `Location.location_type` and `is_active`,
+  which do not exist; and two test expectations did not match the API
+  (paginated list shape, and a return-items test that never created the OUT row).
+- Task 5 resolves the new return through the ORM because the create response
+  does not include the return id. That is an existing API shape, not changed here.
+- CI lints **added** Python files. Modified legacy files carry thousands of
+  pre-existing findings, so they join the linted set as each phase makes them
+  clean. This is recorded in ADR 0004.
+- Ruff’s fatal-error scan found two pre-existing production defects that are out
+  of scope for Phase 0 and are carried into Phase 1: `F821` (`BOM` is undefined
+  in `manufacturing/core_views.py`) and `F823` (`User` is referenced before
+  assignment in `manufacturing/core_serializers.py`).

@@ -25,8 +25,8 @@ jobs:
           python manage.py makemigrations --check --dry-run
       - name: Tests (SQLite)
         run: python manage.py test --settings=microsprings_inventory_system.test_settings
-      - name: Ruff on changed files
+      - name: Ruff (added files)
         run: |
           if [ -n "$GITHUB_BASE_REF" ]; then BASE="origin/$GITHUB_BASE_REF"; else BASE="HEAD~1"; fi
-          FILES=$(git diff --name-only "$BASE"...HEAD -- '*.py' | grep -v '/migrations/' || true)
+          FILES=$(git diff --name-only --diff-filter=A "$BASE"...HEAD -- '*.py' | grep -v '/migrations/' || true)
           if [ -n "$FILES" ]; then ruff check $FILES; fi

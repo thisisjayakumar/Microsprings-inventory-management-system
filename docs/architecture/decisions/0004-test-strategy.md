@@ -69,11 +69,13 @@ On every push and pull request:
 1. `python manage.py check`
 2. `python manage.py makemigrations --check --dry-run`
 3. The SQLite suite
-4. Ruff on new files and on changed files that are already clean
+4. Ruff on added Python files
 
 Ruff starts with `E`, `F`, and `I`, ignoring `E501` and `F541` while legacy files
 are brought into compliance. The ignore list is a ratchet and shrinks over time;
-the whole repository is not reformatted in one commit.
+the whole repository is not reformatted in one commit. Modified legacy files are
+not linted yet because they carry thousands of pre-existing findings; each phase
+adds its touched modules to the linted set once they are clean.
 
 ## Consequences
 
