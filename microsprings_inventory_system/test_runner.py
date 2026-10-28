@@ -2,14 +2,14 @@
 Custom Test Runner for Isolated MySQL Test Databases
 Creates a new database with random suffix for each test run and cleans up afterward.
 """
-import uuid
-import time
-import os
-from django.test.runner import DiscoverRunner
-from django.db import connection
-from django.core.management import call_command
-from django.conf import settings
 import logging
+import os
+import time
+import uuid
+
+from django.conf import settings
+from django.db import connection
+from django.test.runner import DiscoverRunner
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ class IsolatedMySQLTestRunner(DiscoverRunner):
         """
         Create the test database with a random suffix.
         """
+        if 'mysql' not in settings.DATABASES['default']['ENGINE']:
+            return super().setup_databases(**kwargs)
+
         # Get the original database configuration
         db_config = settings.DATABASES['default']
         self.original_database_name = db_config['NAME']
@@ -93,6 +96,9 @@ class IsolatedMySQLTestRunner(DiscoverRunner):
         """
         Drop the test database after tests complete.
         """
+        if 'mysql' not in settings.DATABASES['default']['ENGINE']:
+            return super().teardown_databases(old_config, **kwargs)
+
         if self.test_database_name:
             logger.info(f"🧹 Cleaning up test database: {self.test_database_name}")
             

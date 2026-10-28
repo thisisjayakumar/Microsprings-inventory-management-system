@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = ["**/migrations/**", "**/__pycache__/**", ".git", "staticfiles", "media"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+# Ratchet: remove these once the existing files are formatted.
+ignore = ["E501", "F541"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["microsprings_inventory_system"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "microsprings_inventory_system.test_settings"
+python_files = ["test_*.py"]
