@@ -96,5 +96,6 @@ Rules that the flow enforces:
 
 - It does not split the system into microservices.
 - It does not rename apps, models, tables, or URLs.
-- It does not change response shapes in Phases 0–2.
+- It does not remove or rename response fields in Phases 0–2. Additive fields
+  only; Phase 0 added `id` to the dispatch-transaction create response.
 - It does not modify the separate Next.js frontend repository.

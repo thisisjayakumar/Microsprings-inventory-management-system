@@ -128,7 +128,8 @@ ledger row per correction. It is idempotent and safe to re-run.
 
 - The service becomes a central, high-traffic module and must stay small and
   well tested.
-- The legacy projection remains until Phase 3, so every write must update both
+- The legacy projection is kept consistent through Phase 1 and removed only
+  after a reconciliation period and an API audit, so every write must update both
   projections consistently.
 - The `quantity > 0` constraint requires a pre-flight check for existing
   non-positive rows; those rows are never rewritten automatically.

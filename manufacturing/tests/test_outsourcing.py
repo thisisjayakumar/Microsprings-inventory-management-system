@@ -305,7 +305,7 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
         
         # Create default locations for inventory transactions
         self.dispatch_location = Location.objects.create(
-            code='DISPATCH',
+            code='DISPATCH_ZONE',
             location_name='dispatched',
         )
         

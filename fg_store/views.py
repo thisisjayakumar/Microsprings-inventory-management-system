@@ -106,8 +106,10 @@ class DispatchTransactionViewSet(viewsets.ModelViewSet):
         """Create a dispatch transaction and return the full representation."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        instance = serializer.save()
-        output = DispatchTransactionSerializer(instance)
+        self.perform_create(serializer)
+        output = DispatchTransactionSerializer(
+            serializer.instance, context=self.get_serializer_context()
+        )
         return Response(output.data, status=status.HTTP_201_CREATED)
     
     def get_queryset(self):

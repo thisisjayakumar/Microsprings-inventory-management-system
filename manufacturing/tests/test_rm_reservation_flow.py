@@ -7,10 +7,8 @@ from unittest import expectedFailure
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from django.utils import timezone
 
 from inventory.models import RawMaterial, RMStockBalance, RMStockBalanceHeat
-from inventory.serializers import RawMaterialBasicSerializer
 from manufacturing.models import ManufacturingOrder, MOApprovalWorkflow, RawMaterialAllocation
 from manufacturing.services.workflow import ManufacturingWorkflowService
 from products.models import Product
@@ -150,7 +148,7 @@ class RMRervationFlowTestCase(TestCase):
         initial_reserved = self.get_reserved_quantity(self.raw_material)
         mo_required_kg = self.mo.rm_required_kg
         
-        print(f"Before Approval:")
+        print("Before Approval:")
         print(f"  Total Stock: {initial_total_stock} kg")
         print(f"  Heat Stock: {initial_heat_stock} kg")
         print(f"  Reserved: {initial_reserved} kg")
@@ -172,7 +170,7 @@ class RMRervationFlowTestCase(TestCase):
         after_heat_stock = self.get_heat_available_quantity(self.raw_material)
         after_reserved = self.get_reserved_quantity(self.raw_material)
         
-        print(f"\nAfter Approval:")
+        print("\nAfter Approval:")
         print(f"  Total Stock: {after_total_stock} kg")
         print(f"  Heat Stock: {after_heat_stock} kg")
         print(f"  Reserved: {after_reserved} kg")
@@ -192,7 +190,7 @@ class RMRervationFlowTestCase(TestCase):
         self.assertEqual(after_reserved, mo_required_kg,
                         f"Reserved quantity should equal MO required quantity ({mo_required_kg} kg)")
         self.assertEqual(after_total_stock, initial_total_stock - mo_required_kg,
-                        f"Available stock should decrease by reserved quantity")
+                        "Available stock should decrease by reserved quantity")
         
         print("✓ MO approval and RM reservation verified")
     
@@ -214,7 +212,7 @@ class RMRervationFlowTestCase(TestCase):
         after_approval_reserved = self.get_reserved_quantity(self.raw_material)
         mo_required_kg = self.mo.rm_required_kg
         
-        print(f"After Approval:")
+        print("After Approval:")
         print(f"  Total Stock: {after_approval_total_stock} kg")
         print(f"  Heat Stock: {after_approval_heat_stock} kg")
         print(f"  Reserved: {after_approval_reserved} kg")
@@ -230,7 +228,7 @@ class RMRervationFlowTestCase(TestCase):
         
         # Stop MO
         try:
-            released_resources = self.mo.stop_mo(
+            self.mo.stop_mo(
                 stop_reason="Test stop reason",
                 stopped_by_user=self.manager_user
             )
@@ -243,7 +241,7 @@ class RMRervationFlowTestCase(TestCase):
         after_stop_heat_stock = self.get_heat_available_quantity(self.raw_material)
         after_stop_reserved = self.get_reserved_quantity(self.raw_material)
         
-        print(f"\nAfter Stop:")
+        print("\nAfter Stop:")
         print(f"  Total Stock: {after_stop_total_stock} kg")
         print(f"  Heat Stock: {after_stop_heat_stock} kg")
         print(f"  Reserved: {after_stop_reserved} kg")
@@ -273,17 +271,12 @@ class RMRervationFlowTestCase(TestCase):
         self.assertEqual(after_stop_reserved, Decimal('0'),
                         "Reserved quantity should be 0 after stop")
         self.assertEqual(after_stop_total_stock, after_approval_total_stock + mo_required_kg,
-                        f"Available stock should increase by released quantity")
-        # Note: Reserved allocations don't affect RMStockBalanceHeat, so it should remain unchanged
-        self.assertEqual(after_stop_heat_stock, after_approval_heat_stock,
-                        f"Heat stock should remain unchanged (reserved allocations don't affect it)")
+                        "Available stock should increase by released quantity")
+        # The heat projection is asserted separately in the focused expected-failure
+        # test below; this test characterizes the legacy balance and allocations.
         
         print("✓ MO stop and RM release verified")
     
-    # Known ledger bug: stop_mo releases the legacy balance but not the heat balance.
-    # Phase 1 replaces both writes with StockService.release_rm(). Remove this
-    # decorator when the test starts passing.
-    @expectedFailure
     def test_04_complete_flow(self):
         """Test 4: Complete flow from start to finish - comprehensive test"""
         print("\n=== Test 4: Complete Flow ===")
@@ -293,7 +286,7 @@ class RMRervationFlowTestCase(TestCase):
         initial_heat = self.get_heat_available_quantity(self.raw_material)
         initial_reserved = self.get_reserved_quantity(self.raw_material)
         
-        print(f"Step 1 - Initial State:")
+        print("Step 1 - Initial State:")
         print(f"  Total Stock: {initial_total} kg")
         print(f"  Heat Stock: {initial_heat} kg")
         print(f"  Reserved: {initial_reserved} kg")
@@ -311,7 +304,7 @@ class RMRervationFlowTestCase(TestCase):
         after_approval_heat = self.get_heat_available_quantity(self.raw_material)
         after_approval_reserved = self.get_reserved_quantity(self.raw_material)
         
-        print(f"\nStep 2 - After Approval:")
+        print("\nStep 2 - After Approval:")
         print(f"  Total Stock: {after_approval_total} kg (decreased by {initial_total - after_approval_total} kg)")
         print(f"  Heat Stock: {after_approval_heat} kg (decreased by {initial_heat - after_approval_heat} kg)")
         print(f"  Reserved: {after_approval_reserved} kg (increased by {after_approval_reserved - initial_reserved} kg)")
@@ -333,7 +326,7 @@ class RMRervationFlowTestCase(TestCase):
         after_stop_heat = self.get_heat_available_quantity(self.raw_material)
         after_stop_reserved = self.get_reserved_quantity(self.raw_material)
         
-        print(f"\nStep 3 - After Stop:")
+        print("\nStep 3 - After Stop:")
         print(f"  Total Stock: {after_stop_total} kg (increased by {after_stop_total - after_approval_total} kg)")
         print(f"  Heat Stock: {after_stop_heat} kg (increased by {after_stop_heat - after_approval_heat} kg)")
         print(f"  Reserved: {after_stop_reserved} kg (decreased by {after_approval_reserved - after_stop_reserved} kg)")
@@ -343,10 +336,34 @@ class RMRervationFlowTestCase(TestCase):
                         "Reserved should be 0 after stop")
         self.assertEqual(after_stop_total, initial_total,
                         "Total stock should return to initial value")
-        self.assertEqual(after_stop_heat, initial_heat,
-                        "Heat stock should return to initial value")
         
         print("\n✓ Complete flow verified - All quantities restored correctly")
+
+    # Known ledger bug: stop_mo releases the legacy balance but not the heat balance.
+    # Phase 1 replaces both writes with StockService.release_rm(). Remove this
+    # decorator when the test starts passing.
+    @expectedFailure
+    def test_04b_heat_balance_restored_after_stop(self):
+        """Focused regression: stopping an MO restores the heat projection."""
+        initial_heat = self.get_heat_available_quantity(self.raw_material)
+
+        ManufacturingWorkflowService.approve_mo(
+            mo_id=self.mo.id,
+            manager_user=self.manager_user,
+            approval_notes="Test approval"
+        )
+        self.mo.refresh_from_db()
+        self.mo.stop_mo(
+            stop_reason="Test stop",
+            stopped_by_user=self.manager_user
+        )
+        self.mo.refresh_from_db()
+
+        self.assertEqual(
+            self.get_heat_available_quantity(self.raw_material),
+            initial_heat,
+            "Heat stock should return to its initial value after stop",
+        )
     
     def test_05_reserved_quantity_excludes_released(self):
         """Test 5: Verify that reserved quantity calculation excludes released allocations"""
@@ -372,7 +389,7 @@ class RMRervationFlowTestCase(TestCase):
             status='released'
         ).count()
         
-        print(f"After Approval:")
+        print("After Approval:")
         print(f"  Reserved Quantity: {reserved_after_approval} kg")
         print(f"  Total Allocations: {total_allocations}")
         print(f"  Active Allocations (reserved/locked): {active_allocations}")
@@ -404,7 +421,7 @@ class RMRervationFlowTestCase(TestCase):
             status='released'
         ).count()
         
-        print(f"\nAfter Stop:")
+        print("\nAfter Stop:")
         print(f"  Reserved Quantity: {reserved_after_stop} kg")
         print(f"  Total Allocations: {total_allocations_after}")
         print(f"  Active Allocations (reserved/locked): {active_allocations_after}")

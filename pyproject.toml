@@ -13,4 +13,4 @@ known-first-party = ["microsprings_inventory_system"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "microsprings_inventory_system.test_settings"
-python_files = ["test_*.py"]
+python_files = ["test_*.py", "tests.py"]

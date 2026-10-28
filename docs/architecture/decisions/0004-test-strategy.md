@@ -6,7 +6,7 @@
 
 ## Context
 
-The baseline suite had 47 tests with 6 failures and 22 errors, and 10 apps had
+The baseline suite had 46 tests with 6 failures and 22 errors, and 10 apps had
 placeholder `tests.py` files. The custom test runner assumed MySQL and could not
 run without a database server. There was no lint configuration, no CI, and no
 convention for recording a known bug without hiding it.
@@ -17,12 +17,14 @@ convention for recording a known bug without hiding it.
 
 - **Fast profile:** SQLite in memory via
   `microsprings_inventory_system.test_settings`, locmem cache, MD5 password
-  hashing, and the standard Django test runner. This is the default for local
+  hashing, and the custom runner with a `DiscoverRunner` fallback. This is the
+  default for local
   development and CI. It must run with only Python installed.
 - **Concurrency profile:** MySQL, using the existing isolated-database runner.
   This profile is required for tests that prove row locking, deadlock retry, and
-  real transaction isolation. Those tests are marked and run in a separate CI
-  job when a MySQL service is available.
+  real transaction isolation. Phase 0 has no MySQL-specific tests, so the CI job
+  is deferred; it is added with the Phase 1 concurrency tests and runs against a
+  MySQL service.
 
 The custom runner delegates to Django's `DiscoverRunner` whenever the configured
 engine is not MySQL.

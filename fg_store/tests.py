@@ -382,6 +382,7 @@ class FGStoreAPITest(APITestCase):
         response = self.client.post('/api/fg-store/dispatch-transactions/', data)
         
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('id', response.data)
         self.assertIn('transaction_id', response.data)
         self.assertEqual(response.data['quantity_dispatched'], 500)
         self.assertEqual(response.data['status'], 'pending_confirmation')

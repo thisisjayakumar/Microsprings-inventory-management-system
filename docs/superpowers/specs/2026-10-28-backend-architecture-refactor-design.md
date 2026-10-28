@@ -1,6 +1,6 @@
 # Backend Architecture Refactor — Design
 
-- **Status:** Proposed (awaiting approval)
+- **Status:** Accepted (approved 2026-10-28)
 - **Date:** 2026-10-28
 - **Scope:** Django backend in `Microsprings-inventory-management-system`
 - **Chosen approach:** A — backend-first modular monolith. The Next.js frontend is a follow-on track in its own repository (`../microsprings/msp-frontend`) and is not modified by this design.

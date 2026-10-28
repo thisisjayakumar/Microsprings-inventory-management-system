@@ -19,3 +19,17 @@ class RunnerFallbackTests(SimpleTestCase):
         self.assertEqual(result, 'sentinel')
         parent.assert_called_once()
         self.assertIsNone(runner.test_database_name)
+
+    @override_settings(DATABASES={
+        'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': ':memory:'}
+    })
+    def test_sqlite_engine_delegates_to_parent_teardown(self):
+        runner = IsolatedMySQLTestRunner(verbosity=0, interactive=False)
+        with patch(
+            'django.test.runner.DiscoverRunner.teardown_databases',
+            return_value='torn-down',
+        ) as parent:
+            result = runner.teardown_databases('old-config')
+        self.assertEqual(result, 'torn-down')
+        parent.assert_called_once_with('old-config')
+        self.assertIsNone(runner.test_database_name)

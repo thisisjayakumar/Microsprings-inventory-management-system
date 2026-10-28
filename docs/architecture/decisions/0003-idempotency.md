@@ -33,10 +33,11 @@ Examples:
 - `rm_return:55:disposition`
 
 All ledger rows produced by the operation share it. Before doing work, the
-service checks whether any row with that key exists. Because the whole operation
-runs in one `transaction.atomic()`, either all rows committed or none did; if
-some rows exist, the operation already ran and the service returns the existing
-result instead of re-applying stock.
+service checks whether any row with that key exists. A **complete** row set means
+the operation already ran and the service returns the existing result instead of
+re-applying stock. A **partial** row set means prior corruption, not a replay:
+the service raises and points at reconciliation. Because the whole operation runs
+in one `transaction.atomic()`, either all rows committed or none did.
 
 Partial receipts include the GRN line and heat number in the key so a second
 delivery is a new operation, not a replay. Keys are derived from stable business

@@ -92,6 +92,20 @@ class GRNReceiptFlowTests(APITestCase):
             Decimal('100.000'),
         )
 
+    def test_completing_grn_succeeds_and_keeps_heat_stock(self):
+        response = self.create_grn()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        grn = GRNReceipt.objects.get()
+
+        complete = self.client.post(
+            f'/api/inventory/grn-receipts/{grn.id}/complete_receipt/'
+        )
+        self.assertEqual(complete.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            HeatNumber.objects.get(heat_number='HEAT-001').get_available_quantity_kg(),
+            Decimal('100.000'),
+        )
+
     @expectedFailure
     def test_completing_grn_does_not_double_count_legacy_stock(self):
         # Known legacy bug: creation adds the weight to RMStockBalance and

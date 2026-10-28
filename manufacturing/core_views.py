@@ -3989,7 +3989,7 @@ class OutsourcingRequestViewSet(viewsets.ModelViewSet):
                 if not outgoing_location:
                     # Create a default dispatch location if none exists
                     outgoing_location = Location.objects.create(
-                        code='DISPATCH',
+                        code='DISPATCH_ZONE',
                         location_name='dispatched',
                     )
                 

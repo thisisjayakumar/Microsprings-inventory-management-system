@@ -1,9 +1,11 @@
 """Fast, dependency-free test settings (SQLite, locmem cache)."""
 import os
 
-os.environ.setdefault('USE_REDIS', 'False')
+os.environ['USE_REDIS'] = 'False'
 
 from .settings import *  # noqa: F401,F403
+
+USE_REDIS = False
 
 DATABASES = {
     'default': {
