@@ -1764,7 +1764,7 @@ class OutsourcingRequestDetailSerializer(serializers.ModelSerializer):
             'notes', 'is_overdue', 'total_items', 'total_qty', 'total_kg',
             'items', 'items_data', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['request_id', 'created_at', 'updated_at']
+        read_only_fields = ['request_id', 'created_at', 'updated_at', 'vendor', 'created_by']
     
     def create(self, validated_data):
         """Create outsourcing request with items"""
@@ -1789,7 +1789,7 @@ class OutsourcingRequestDetailSerializer(serializers.ModelSerializer):
         request = OutsourcingRequest.objects.create(
             vendor=vendor,
             collected_by=collected_by,
-            created_by=self.context['request'].user,
+            created_by=validated_data.pop('created_by', None) or self.context['request'].user,
             **validated_data
         )
         

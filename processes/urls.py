@@ -7,6 +7,8 @@ from .views import (
     SupervisorActivityLogViewSet
 )
 
+app_name = 'processes'
+
 router = DefaultRouter()
 router.register(r'processes', ProcessViewSet, basename='process')
 router.register(r'work-centers', WorkCenterMasterViewSet, basename='work-center')

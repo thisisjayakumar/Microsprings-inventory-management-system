@@ -3983,15 +3983,14 @@ class OutsourcingRequestViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 # Get default outgoing location (or create one if needed)
                 outgoing_location = Location.objects.filter(
-                    location_type='dispatch'
+                    location_name='dispatched'
                 ).first()
                 
                 if not outgoing_location:
                     # Create a default dispatch location if none exists
                     outgoing_location = Location.objects.create(
-                        location_name='Dispatch Area',
-                        location_type='dispatch',
-                        is_active=True
+                        code='DISPATCH',
+                        location_name='dispatched',
                     )
                 
                 for item in outsourcing_request.items.all():
@@ -4063,15 +4062,14 @@ class OutsourcingRequestViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 # Get default incoming location (or create one if needed)
                 incoming_location = Location.objects.filter(
-                    location_type='fg_store'
+                    location_name='fg'
                 ).first()
                 
                 if not incoming_location:
                     # Create a default FG store location if none exists
                     incoming_location = Location.objects.create(
-                        location_name='Finished Goods Store',
-                        location_type='fg_store',
-                        is_active=True
+                        code='FG_STORE',
+                        location_name='fg',
                     )
                 
                 # Update returned quantities for items

@@ -288,6 +288,7 @@ class DispatchTransaction(models.Model):
         
         # Update dispatch batch quantities
         self.dispatch_batch.quantity_dispatched += self.quantity_dispatched
+        self.dispatch_batch.save(update_fields=['quantity_dispatched', 'updated_at'])
         self.dispatch_batch.update_status()
         
         # Update MO status if all batches are dispatched

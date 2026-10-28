@@ -1,15 +1,18 @@
-from django.test import TestCase
-from django.contrib.auth import get_user_model
-from django.utils import timezone
-from rest_framework.test import APITestCase
-from rest_framework import status
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from .models import DispatchBatch, DispatchTransaction, FGStockAlert, DispatchOrder
-from manufacturing.models import ManufacturingOrder, Batch
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.test import APITestCase
+
+from authentication.models import Role, UserRole
+from inventory.models import RawMaterial
+from manufacturing.models import Batch, ManufacturingOrder
 from products.models import Product
 from third_party.models import Customer
-from inventory.models import RawMaterial
+
+from .models import DispatchBatch, DispatchTransaction
 
 User = get_user_model()
 
@@ -252,8 +255,16 @@ class FGStoreAPITest(APITestCase):
             last_name='User'
         )
         
-        # Create FG Store role (assuming role system exists)
-        # This would need to be adapted based on your actual role system
+        # Create FG Store role for the API test user
+        role, _ = Role.objects.get_or_create(
+            name='fg_store',
+            defaults={'description': 'FG Store'},
+        )
+        UserRole.objects.get_or_create(
+            user=self.user,
+            role=role,
+            defaults={'is_active': True},
+        )
         
         self.customer = Customer.objects.create(
             name='Test Customer',

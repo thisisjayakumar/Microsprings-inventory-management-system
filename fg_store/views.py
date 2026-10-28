@@ -101,6 +101,14 @@ class DispatchTransactionViewSet(viewsets.ModelViewSet):
         elif self.action == 'confirm':
             return DispatchTransactionConfirmSerializer
         return DispatchTransactionSerializer
+
+    def create(self, request, *args, **kwargs):
+        """Create a dispatch transaction and return the full representation."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        instance = serializer.save()
+        output = DispatchTransactionSerializer(instance)
+        return Response(output.data, status=status.HTTP_201_CREATED)
     
     def get_queryset(self):
         queryset = DispatchTransaction.objects.select_related(

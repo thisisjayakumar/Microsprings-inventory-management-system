@@ -1,13 +1,14 @@
-from django.test import TestCase, TransactionTestCase
-from django.contrib.auth import get_user_model
-from django.utils import timezone
-from django.db import transaction
-from decimal import Decimal
 from datetime import date, timedelta
+from decimal import Decimal
 
-from manufacturing.models import OutsourcingRequest, OutsourcedItem
-from third_party.models import Vendor
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
+from django.test import TestCase, TransactionTestCase
+
+from authentication.models import Role, UserRole
 from inventory.models import InventoryTransaction, Location
+from manufacturing.models import OutsourcedItem, OutsourcingRequest
+from third_party.models import Vendor
 
 User = get_user_model()
 
@@ -17,6 +18,7 @@ class OutsourcingRequestModelTest(TestCase):
     
     def setUp(self):
         self.user = User.objects.create_user(
+            username='test@example.com',
             email='test@example.com',
             password='testpass123',
             first_name='Test',
@@ -57,7 +59,7 @@ class OutsourcingRequestModelTest(TestCase):
         )
         
         self.assertTrue(request.request_id.startswith('OUT-'))
-        self.assertEqual(len(request.request_id), 15)  # OUT-YYYYMMDD-NNNN format
+        self.assertEqual(len(request.request_id), 17)  # OUT-YYYYMMDD-NNNN format
     
     def test_is_overdue_property(self):
         """Test the is_overdue property"""
@@ -173,6 +175,7 @@ class OutsourcedItemModelTest(TestCase):
     
     def setUp(self):
         self.user = User.objects.create_user(
+            username='test@example.com',
             email='test@example.com',
             password='testpass123',
             first_name='Test',
@@ -261,7 +264,10 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
     """Test cases for OutsourcingRequestViewSet API endpoints"""
     
     def setUp(self):
+        # Permission classes cache user roles for 300s; clear between tests.
+        cache.clear()
         self.user = User.objects.create_user(
+            username='test@example.com',
             email='test@example.com',
             password='testpass123',
             first_name='Test',
@@ -269,10 +275,24 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
         )
         
         self.manager = User.objects.create_user(
+            username='manager@example.com',
             email='manager@example.com',
             password='testpass123',
             first_name='Manager',
             last_name='User'
+        )
+        
+        supervisor_role, _ = Role.objects.get_or_create(
+            name='supervisor', defaults={'description': 'Supervisor'}
+        )
+        manager_role, _ = Role.objects.get_or_create(
+            name='manager', defaults={'description': 'Manager'}
+        )
+        UserRole.objects.get_or_create(
+            user=self.user, role=supervisor_role, defaults={'is_active': True}
+        )
+        UserRole.objects.get_or_create(
+            user=self.manager, role=manager_role, defaults={'is_active': True}
         )
         
         self.vendor = Vendor.objects.create(
@@ -285,15 +305,13 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
         
         # Create default locations for inventory transactions
         self.dispatch_location = Location.objects.create(
-            location_name='Dispatch Area',
-            location_type='dispatch',
-            is_active=True
+            code='DISPATCH',
+            location_name='dispatched',
         )
         
         self.fg_location = Location.objects.create(
-            location_name='Finished Goods Store',
-            location_type='fg_store',
-            is_active=True
+            code='FG_STORE',
+            location_name='fg',
         )
     
     def test_create_outsourcing_request(self):
@@ -434,8 +452,10 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
             reference_type='outsourcing',
             reference_id=str(request.id)
         )
-        self.assertEqual(transactions.count(), 2)  # One OUT, one IN
-        
+        # This request was created directly in 'sent' state, so only the
+        # return (IN) transaction exists; the OUT came from the send endpoint.
+        self.assertEqual(transactions.count(), 1)
+
         in_transaction = transactions.filter(transaction_type='inward').first()
         self.assertEqual(in_transaction.transaction_type, 'inward')
         self.assertEqual(in_transaction.quantity, Decimal('95'))
@@ -454,13 +474,14 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
         )
         
         other_user = User.objects.create_user(
+            username='other@example.com',
             email='other@example.com',
             password='testpass123',
             first_name='Other',
             last_name='User'
         )
         
-        request2 = OutsourcingRequest.objects.create(
+        OutsourcingRequest.objects.create(
             created_by=other_user,
             vendor=self.vendor,
             expected_return_date=date.today() + timedelta(days=7)
@@ -474,7 +495,7 @@ class OutsourcingRequestViewSetTest(TransactionTestCase):
         response = client.get('/api/manufacturing/outsourcing/')
         self.assertEqual(response.status_code, 200)
         
-        requests_data = response.json()
+        requests_data = response.json()['results']
         # Should only see request1 (created by self.user)
         self.assertEqual(len(requests_data), 1)
         self.assertEqual(requests_data[0]['id'], request1.id)
